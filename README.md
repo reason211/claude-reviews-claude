@@ -2,17 +2,16 @@
 
 # 🪞 Claude 眼中的老己
 
-### *Claude Reviews Claude Code*
+### *Claude 剖析 Claude Code*
 
 *一个 AI 在阅读自己的源代码。是的，这很元（Meta）。*
 
-*翻开之后它说："原来我是这么工作的啊。"*
 
 [![Stars](https://img.shields.io/github/stars/openedclaude/claude-reviews-claude?style=social)](https://github.com/openedclaude/claude-reviews-claude)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/openedclaude/claude-reviews-claude)](https://github.com/openedclaude/claude-reviews-claude)
 
-> **这份完整的架构分析是由 Claude 撰写的 —— 分析对象正是驱动 Claude Code 的源代码本身。**
+> **这份完整的架构分析是由 Claude 撰写的**
 >
 > 1,902 个文件。477,439 行 TypeScript 代码。一个模型坐下来，逐行阅读了定义自己如何思考、行动和执行的每一行逻辑。
 >

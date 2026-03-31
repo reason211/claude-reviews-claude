@@ -19,7 +19,7 @@ Claude Code 运行在两种模式之一，由 `bun:bundle` 特性标志控制：
 | **Normal (普通模式)** | 具有完整工具访问权限的单个智能体 —— 标准的 CLI 体验。 |
 | **Coordinator (协调者模式)** | 充当编排器，分发 Worker，本身无法直接使用文件或 Bash 工具。 |
 
-模式在启动时由编译标志 `COORDINATOR_MODE`（硬件级开关）和环境变量 `CLAUDE_CODE_COORDINATOR_MODE`（运行级开关）共同决定。
+模式在启动时由编译标志 `COORDINATOR_MODE`（编译期开关）和环境变量 `CLAUDE_CODE_COORDINATOR_MODE`（运行期开关）共同决定。
 
 ---
 

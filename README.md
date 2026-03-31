@@ -1,93 +1,93 @@
-> 🌐 **Language**: English | [中文版 →](README_CN.md)
+> 🌐 **语言**: [English →](README_EN.md) | 中文
 
-# 🪞 Claude Reviews Claude Code
+# 🪞 Claude 剖析 Claude Code (README 中文版)
 
-*An AI reading its own source code. Yes, really.*
+*一个 AI 在阅读自己的源代码。是的，这很元（Meta）。*
 
 [![Stars](https://img.shields.io/github/stars/openedclaude/claude-reviews-claude?style=social)](https://github.com/openedclaude/claude-reviews-claude)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/openedclaude/claude-reviews-claude)](https://github.com/openedclaude/claude-reviews-claude)
 
-> **This entire analysis was written by Claude — about the source code that powers Claude Code.**
+> **这份完整的架构分析是由 Claude 撰写的 —— 针对驱动 Claude Code 的源代码。**
 >
-> 1,902 files. 477,439 lines of TypeScript. One model reading the code that defines how it thinks, acts, and executes.
+> 1,902 个文件。477,439 行 TypeScript 代码。一个模型正在阅读定义它如何思考、行动和执行的代码。
 >
-> What you're reading is Claude's own architectural decomposition of Claude Code v2.1.88: how the query engine loops, how 42 tools are orchestrated, how multi-agent workers coordinate in parallel — all analyzed by the very model these systems were built to serve.
+> 你现在阅读的是 Claude 对 Claude Code v2.1.88 版本的架构解构：查询引擎如何循环，42 个工具如何编排，多智能体（Multi-agent）工作线程如何并行协调 —— 所有这一切，都由这些系统所服务的模型亲自分析。
 >
-> *We didn't plan the irony. We just leaned into it.*
+> *我们并未预料到这种讽刺感。我们只是顺势而为。*
 
 ---
 
-## 🏗️ What's Inside
+## 🏗️ 核心内容
 
-This is **not** a source code dump. It's a structured engineering analysis — architecture diagrams, code walkthroughs, and design patterns — written by Claude after reading Claude Code's TypeScript source.
+这**绝非**简单的源代码归档。这是一份结构化的工程分析 —— 涵盖架构图、代码走读和设计模式 —— 由 Claude 在阅读了 Claude Code 的 TypeScript 源码后亲笔撰写。
 
-| # | Topic | What You'll Learn | Deep Dive |
+| # | 主题 | 你将学到什么 | 深度分析 |
 |---|-------|-------------------|-----------|
-| 1 | **QueryEngine: The Brain** | How the 1,296-line core engine manages LLM queries, tool loops, and session state | [Read →](architecture/01-query-engine.md) |
-| 2 | **Tool System Architecture** | How 42+ tools are registered, validated, and executed as self-contained modules | [Read →](architecture/02-tool-system.md) |
-| 3 | **Multi-Agent Coordinator** | How Claude Code spawns parallel workers, routes messages, and synthesizes results | [Read →](architecture/03-coordinator.md) |
-| 4 | **Plugin System** | How plugins are loaded, validated, and integrated (18.8K lines) | [Read →](architecture/04-plugin-system.md) |
-| 5 | **Hook System** | PreToolUse / PostToolUse / SessionStart extensibility (8K lines) | [Read →](architecture/05-hook-system.md) |
-| 6 | **Bash Execution Engine** | Secure command execution, sandbox, pipe management (11.5K lines) | Coming soon |
-| 7 | **Permission Pipeline** | Defense-in-depth: config rules → tool checks → OS sandbox (9.5K lines) | Coming soon |
+| 1 | **查询引擎 (QueryEngine)：大脑** | 核心引擎（1296行）如何管理 LLM 查询、工具循环和会话状态 | [阅读 →](architecture/zh-CN/01-query-engine.md) |
+| 2 | **工具系统架构 (Tool System)** | 42+ 个工具作为自包含模块如何注册、验证和执行 | [阅读 →](architecture/zh-CN/02-tool-system.md) |
+| 3 | **多智能体协调器 (Coordinator)** | Claude Code 如何衍生并行工作线程、分发消息并汇总结果 | [阅读 →](architecture/zh-CN/03-coordinator.md) |
+| 4 | **插件系统 (Plugin System)** | 插件如何加载、验证和集成（1.88万行代码） | [阅读 →](architecture/zh-CN/04-plugin-system.md) |
+| 5 | **钩子系统 (Hook System)** | 涵盖 PreToolUse / PostToolUse / SessionStart 的可扩展性（8千行代码） | [阅读 →](architecture/zh-CN/05-hook-system.md) |
+| 6 | **Bash 执行引擎 (Bash Engine)** | 安全命令执行、沙箱管理、管道流处理（1.15万行代码） | 敬请期待 |
+| 7 | **权限流水线 (Permission)** | 纵深防御：配置规则 → 工具检查 → 操作系统沙箱（9.5千行代码） | 敬请期待 |
 
-> ⭐ **Enjoy the meta? Star the repo — an AI analyzing itself deserves at least that.**
+> ⭐ **喜欢这种“套娃”感吗？给这个仓库点个赞吧 —— 一个正在分析自己的 AI 值得拥有这颗星。**
 
 ---
 
-## 🧠 Architecture Overview
+## 🧠 架构概览
 
-Claude Code is a **1,902-file, 477K-line TypeScript** codebase running on **Bun**, with a terminal UI built on **React + Ink**. Here's the high-level architecture:
+Claude Code 是一个包含 **1,902 个文件、47.7 万行 TypeScript** 的代码库，运行在 **Bun** 环境上，并使用 **React + Ink** 构建终端 UI。以下是其高层架构图：
 
 ```mermaid
 graph TB
-    subgraph Entry["🚀 Entrypoint"]
-        CLI["main.tsx<br/>Commander.js CLI Parser"]
-        BOOT["Bootstrap<br/>Prefetch + Keychain + GrowthBook"]
+    subgraph Entry["🚀 入口点"]
+        CLI["main.tsx<br/>Commander.js 命令行解析"]
+        BOOT["引导程序 (Bootstrap)<br/>预取 + 密钥链 + GrowthBook"]
     end
 
-    subgraph Core["⚙️ Core Engine"]
-        QE["QueryEngine<br/>Session lifecycle, tool loop,<br/>streaming, usage tracking"]
-        Q["query()<br/>LLM API call + tool execution loop"]
-        PUI["processUserInput()<br/>Slash commands, attachments,<br/>input normalization"]
+    subgraph Core["⚙️ 核心引擎"]
+        QE["查询引擎 (QueryEngine)<br/>会话生命周期、工具循环、<br/>流处理、用量跟踪"]
+        Q["query()<br/>LLM API 调用 + 工具执行循环"]
+        PUI["用户输入处理 (processUserInput)<br/>斜杠命令、附件、<br/>输入规范化"]
     end
 
-    subgraph Tools["🔧 Tool System (42 modules)"]
+    subgraph Tools["🔧 工具系统 (42 个模块)"]
         direction LR
-        FS["File Tools<br/>Read / Write / Edit / Glob / Grep"]
-        EXEC["Execution<br/>Bash / PowerShell / REPL"]
-        AGENT["Agent Tools<br/>AgentTool / SendMessage /<br/>TeamCreate / TeamDelete"]
-        EXT["External<br/>MCP / LSP / WebFetch / WebSearch"]
-        PLAN["Workflow<br/>EnterPlanMode / Worktree /<br/>TaskCreate / SkillTool"]
+        FS["文件工具<br/>读/写/编辑/通配符/搜索"]
+        EXEC["执行工具<br/>Bash / PowerShell / REPL"]
+        AGENT["智能体工具<br/>AgentTool / 发送消息 /<br/>团队管理"]
+        EXT["外部集成<br/>MCP / LSP / 网页抓取 / 搜索"]
+        PLAN["工作流<br/>计划模式 / 工作树 /<br/>任务创建 / 技能工具"]
     end
 
-    subgraph Permission["🔐 Permission System"]
-        PP["Permission Pipeline<br/>Config → Rules → Sandbox → User Prompt"]
-        SB["Sandbox Manager<br/>macOS: seatbelt<br/>Linux: seccomp+namespace"]
+    subgraph Permission["🔐 权限系统"]
+        PP["权限流水线<br/>配置 → 规则 → 沙箱 → 用户确认"]
+        SB["沙箱管理器 (Sandbox)<br/>macOS: seatbelt<br/>Linux: seccomp+namespace"]
     end
 
-    subgraph Coord["🤖 Multi-Agent Coordinator"]
-        CM["coordinatorMode.ts<br/>Worker dispatch + message routing"]
-        WORKERS["Worker Agents<br/>Parallel task execution"]
+    subgraph Coord["🤖 多智能体协调器"]
+        CM["coordinatorMode.ts<br/>工作线程调度 + 消息路由"]
+        WORKERS["工作智能体 (Workers)<br/>并行任务执行"]
     end
 
-    subgraph Services["📡 Services"]
-        API["Anthropic API Client<br/>Streaming + retry + fallback"]
-        MCP["MCP Server Manager"]
+    subgraph Services["📡 服务层"]
+        API["Anthropic API 客户端<br/>流式传输 + 重试 + 备用方案"]
+        MCP["MCP 服务管理器"]
         OAUTH["OAuth 2.0"]
-        GB["GrowthBook Feature Flags"]
+        GB["GrowthBook 功能开关"]
     end
 
-    subgraph UI["🖥️ Terminal UI"]
-        INK["React + Ink<br/>140+ components"]
-        BRIDGE["Bridge System<br/>IDE ↔ CLI communication"]
+    subgraph UI["🖥️ 终端 UI"]
+        INK["React + Ink<br/>140+ 个组件"]
+        BRIDGE["IDE 桥接系统<br/>IDE ↔ CLI 双向通信"]
     end
 
-    subgraph State["💾 State & Context"]
-        CTX["Context Assembly<br/>System prompt + user context +<br/>memory + skills + plugins"]
-        COST["CostTracker<br/>Per-model token accounting"]
-        SESS["Session Storage<br/>Transcript persistence"]
+    subgraph State["💾 状态与上下文"]
+        CTX["上下文组装 (Context Assembly)<br/>系统提示词 + 用户上下文 +<br/>记忆 + 技能 + 插件"]
+        COST["成本跟踪 (CostTracker)<br/>各模型 Token 计费"]
+        SESS["会话存储<br/>转录记录持久化"]
     end
 
     CLI --> BOOT
@@ -106,123 +106,89 @@ graph TB
     UI --> BRIDGE
 ```
 
-### Key Architectural Decisions
+### 关键架构决策
 
-| Decision | Choice | Why It Matters |
+| 决策点 | 选择 | 为什么重要 |
 |----------|--------|----------------|
-| **Runtime** | Bun (not Node.js) | ~3x faster startup, native binary bundling, `bun:bundle` feature flags for dead code elimination |
-| **UI Framework** | React + Ink | Component-based terminal UI, state management via hooks, reusable across IDE bridges |
-| **Search Strategy** | Agentic search (grep/glob) over RAG/vector DB | Better precision, always fresh, no index maintenance, security (no embedding leaks) |
-| **Core Loop** | Single-threaded `query()` generator | Simplicity — intelligence lives in the LLM, the scaffold is a dumb loop. AsyncGenerator enables streaming |
-| **Multi-Agent** | Coordinator pattern with `AgentTool` + `SendMessageTool` | Fan-out parallel workers for research, serialize for writes. Workers can't see coordinator's conversation |
-| **Schema** | Zod v4 | Runtime validation + compile-time type inference in one declaration |
-| **Permissions** | Multi-stage pipeline + OS sandbox | Defense in depth: app-level rules → sandbox isolation. Sandbox enables auto-approve for low-risk ops |
-| **Feature Gating** | `bun:bundle` compile-time flags | `COORDINATOR_MODE`, `VOICE_MODE`, `PROACTIVE`, `KAIROS` etc. — dead code stripped at build time |
+| **运行时 (Runtime)** | Bun (而非 Node.js) | 启动速度提升约 3 倍，支持原生二进制打包，利用 `bun:bundle` 实现死代码消除 |
+| **UI 框架** | React + Ink | 基于组件的终端 UI，通过 Hooks 管理状态，可跨 IDE 桥接器复用 |
+| **搜索策略** | 智能体搜索 (grep/glob) | 比 RAG/向量数据库更精确，数据永远保持最新，无需维护索引，更安全 |
+| **核心循环** | 单线程 `query()` 生成器 | 极致简约 —— 智能存在于 LLM 中，脚手架只是个简单的循环。AsyncGenerator 支持流式返回 |
+| **多智能体** | Coordinator 协调器模式 | 扇出并行工作线程进行调研，串行化写入。Worker 无法读取协调者的私密历史 |
+| **模式校验** | Zod v4 | 在一次声明中同时实现运行时验证和编译时类型推导 |
+| **权限管理** | 多级流水线 + OS 沙箱 | 纵深防御：应用层规则 → 内核层沙箱隔离。沙箱允许低风险操作自动批准 |
+| **功能开关** | `bun:bundle` 编译标志 | 协调模式、语音模式、主动模式等代码在构建时即被剔除，减小二进制体积 |
 
 ---
 
-## 📊 Codebase at a Glance
-
-| Metric | Value |
-|--------|-------|
-| Total Files | ~1,900 |
-| Total Lines | 512,664 |
-| Language | TypeScript (strict mode) |
-| Runtime | Bun |
-| Largest File | `main.tsx` (808 KB — bundled entrypoint) |
-| Core Engine | `QueryEngine.ts` (1,296 lines) + `query.ts` (70K) |
-| Built-in Tools | 42 modules |
-| Slash Commands | 50+ |
-| Ink UI Components | 140+ |
-| Feature Flags | `PROACTIVE`, `KAIROS`, `BRIDGE_MODE`, `DAEMON`, `VOICE_MODE`, `AGENT_TRIGGERS`, `MONITOR_TOOL`, `COORDINATOR_MODE`, `HISTORY_SNIP` |
-
 ---
 
-## 📁 Repository Structure
+## 📁 仓库结构
 
 ```
 claude-code-deep-dive/
-├── README.md                          ← You are here
-├── DISCLAIMER.md                      # Legal & ethical notice
+├── README.md                          ← 英文版 README
+├── README_CN.md                       # ← 你现在的所在位置
+├── DISCLAIMER.md                      # 法律与伦理声明
+├── DISCLAIMER_CN.md                   # 法律与伦理声明 (中文版)
 │
-├── architecture/                      # 🏗️ Architecture Deep Dives
-│   ├── 01-query-engine.md             # QueryEngine: the brain
-│   ├── 02-tool-system.md              # 42-module tool architecture
-│   ├── 03-coordinator.md              # Multi-agent coordination
-│   ├── 04-permission-system.md        # Permission pipeline + sandbox
-│   ├── 05-context-assembly.md         # Dynamic prompt assembly
-│   ├── 06-startup-optimization.md     # Prefetch, lazy load, feature flags
-│   ├── 07-bridge-system.md            # IDE ↔ CLI bridge
-│   └── 08-design-patterns.md          # Reusable agentic patterns
+├── architecture/                      # 🏗️ 架构深度分析
+│   ├── 01-query-engine.md             # 查询引擎：大脑
+│   ├── 02-tool-system.md              # 42 模块工具架构
+│   ├── 03-coordinator.md              # 多智能体协调
+│   ├── zh-CN/                         # 🇨🇳 中文版架构解析
+│   │   ├── 01-query-engine.md
+│   │   └── ...
+│   └── ...
 │
 └── stats/
-    └── codebase-metrics.md            # Code statistics
+    └── codebase-metrics.md            # 代码库统计指标
 ```
 
 ---
 
-## 🔑 Key Insights Preview
+## 📌 路线图 (Roadmap)
 
-### 1. The Core Loop Is Deliberately "Dumb"
+**架构解析系列** (核心 - 已完成)
+- [x] 架构概览与图表
+- [x] 查询引擎 (QueryEngine) 深度解析 —— Claude Code 的“大脑”
+- [x] 工具系统 (Tool System) 走读 —— 42 个模块，一个接口
+- [x] 多智能体协调器 (Coordinator) —— 并行线程与分支机制
 
-Claude Code's `query()` function is a simple AsyncGenerator loop: send messages → get response → if tool_use, execute tool → push result → repeat. All intelligence lives in the LLM. This is a deliberate architectural choice — a "dumb scaffold, smart model" philosophy.
+**架构解析系列** (下一阶段 - 高影响力 ⭐⭐⭐)
+- [x] 插件系统 (Plugin System) —— 加载、市场与安装 (1.88万行)
+- [x] 钩子系统 (Hook System) —— PreToolUse / PostToolUse (8千行)
+- [ ] Bash 执行引擎 —— 沙箱、管道管理 (1.15万行)
+- [ ] 权限流水线 —— 纵深防御、操作系统沙箱 (9.5千行)
 
-### 2. Multi-Agent Coordination Is a First-Class Feature
+**架构解析系列** (计划中 - 高价值 ⭐⭐)
+- [ ] Swarm 智能体 —— 多智能体集群协作 (6.8千行)
+- [ ] 会话持久化 —— 对话存储机制 (4.7千行)
+- [ ] 上下文装配 —— 附件、记忆、技能
+- [ ] 压缩系统 —— 自动压缩与微缩技术
+- [ ] 启动优化 —— 预加载与延迟加载
+- [ ] 桥接系统 (Bridge) —— 与 IDE 的双向通信 (1.17万行)
+- [ ] CLAUDE.md 解析 —— 项目上下文文件 (1.3千行)
 
-The Coordinator mode transforms Claude Code from a single-agent CLI into an orchestrator that dispatches parallel worker agents. Workers are fully isolated — they can't see the coordinator's conversation history. The coordinator must synthesize worker results and craft self-contained prompts.
-
-### 3. Dead Code Elimination via Feature Flags
-
-`bun:bundle` feature flags are used at build time to completely strip unused code paths. Voice mode, proactive mode, coordinator mode — all are gated behind compile-time flags, producing a smaller binary.
-
-### 4. Permission System Uses Defense-in-Depth
-
-Permissions are checked at multiple levels: app-level config rules → tool-specific permission models → OS-level sandbox (seccomp on Linux, seatbelt on macOS). When sandbox is active, certain operations auto-approve — trading application-layer checks for kernel-level guarantees.
-
----
-
-## 📌 Roadmap
-
-**Architecture Series** (Core — completed)
-- [x] Architecture overview + diagrams
-- [x] QueryEngine deep dive — the brain of Claude Code
-- [x] Tool system walkthrough — 42 modules, one interface
-- [x] Multi-agent coordinator — parallel workers, fork mechanism
-
-**Architecture Series** (Next up — high impact ⭐⭐⭐)
-- [x] Plugin system — loading, marketplace, installation (18.8K lines)
-- [x] Hook system — PreToolUse / PostToolUse / SessionStart (8K lines)
-- [ ] Bash execution engine — sandbox, pipe management (11.5K lines)
-- [ ] Permission pipeline — defense-in-depth, sandbox (9.5K lines)
-
-**Architecture Series** (Planned — high value ⭐⭐)
-- [ ] Swarm agents — multi-agent group coordination (6.8K lines)
-- [ ] Session persistence — conversation storage (4.7K lines)
-- [ ] Context assembly — attachments, memory, skills
-- [ ] Compact system — auto-compaction, snip, microcompact
-- [ ] Startup optimization — preloading, lazy imports
-- [ ] Bridge system — IDE bidirectional communication (11.7K lines)
-- [ ] CLAUDE.md parsing — project context files (1.3K lines)
-
-**Localization**
-- [ ] 中文 README
+**本地化**
+- [x] 中文 README
 
 ---
 
-## ⭐ Support This Project
+## ⭐ 支持本项目
 
-If this analysis was helpful:
+如果这份分析对你有帮助：
 
-1. **⭐ Star** this repository
-2. **🔀 Fork** to add your own analysis
-3. **📢 Share** on Twitter, Reddit, or Hacker News
+1. **⭐ 点个星星 (Star)** 这个仓库
+2. **🔀 分叉 (Fork)** 并添加你自己的分析
+3. **📢 分享** 到 Twitter, Reddit 或微信/知乎
 
-Every star helps more developers discover this deep dive.
+每一颗星都能帮助更多开发者发现这份深度走读文档。
 
 ---
 
-## 📜 License & Disclaimer
+## 📜 许可与免责声明
 
-This analysis is released under the [MIT License](LICENSE). See [DISCLAIMER.md](DISCLAIMER.md) for important legal and ethical notices.
+本分析文档依据 [MIT 许可证](LICENSE) 发布。请参阅 [DISCLAIMER_CN.md](DISCLAIMER_CN.md) 了解重要的法律和伦理说明。
 
-Analysis based on `@anthropic-ai/claude-code@2.1.88`. All code snippets are brief excerpts used for educational commentary. The original source remains the property of **Anthropic, PBC**.
+分析基于 `@anthropic-ai/claude-code@2.1.88`。所有代码片段均为用于教学评论的简短摘录。原始源代码的权利仍归 **Anthropic, PBC** 所有。

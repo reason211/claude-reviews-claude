@@ -301,7 +301,9 @@ const MAX_MEMORY_BYTES = 4096     // 每文件字节上限（5 × 4KB = 20KB/轮
 
 ---
 
-## 设计洞察
+## 可迁移设计模式
+
+> 以下来自上下文装配系统的模式可直接应用于任何 LLM 提示工程架构。
 
 ### 为什么用 Memoize 而非 Cache？
 
@@ -322,6 +324,69 @@ const timeoutId = setTimeout(ac => ac.abort(), 1000, abortController)
 ### 记忆文件变更检测
 
 `MemoryFileInfo` 上的 `contentDiffersFromDisk` 标志实现了一个巧妙优化：当文件的注入内容与磁盘不同（由于注释剥离、frontmatter 移除或截断），原始内容会同时保留。这让文件状态缓存可以追踪变更而不触发不必要的重读。
+
+---
+
+## 动态附件系统深化
+
+**源码坐标**: `src/utils/attachments.ts`（3,998 行）
+
+### 延迟工具加载
+
+插件和 MCP 工具可能在会话中途到达。附件系统通过增量附件处理：
+
+```typescript
+export type Attachment =
+  | { type: 'deferred_tools_delta'; tools: { added: ToolInfo[]; removed: ToolInfo[] } }
+  | { type: 'agent_listing_delta'; agents: AgentDelta[] }
+  | { type: 'mcp_instructions_delta'; server: string; instructions: string }
+  // ...30+ 更多类型
+```
+
+工具变更时，增量描述**什么改变了**而非重新列出所有工具。这保持注入紧凑，让模型理解"你现在有了一个新工具"而非重新处理整个工具池。
+
+### 系统提示词段落注册表与缓存
+
+动态系统提示词段落通过注册表管理，支持静态和计算内容。缓存结果存储在 `STATE.systemPromptSectionCache` 中，在以下场景清除：
+- `/memory` 对话框变更
+- 设置同步
+- Worktree 进入/退出
+- 显式 `resetSystemPromptSectionCache()`
+
+### 已调用 Skill 保留
+
+会话中调用的 Skill 内容保存在 `STATE.invokedSkills` 中，键为 `${agentId ?? ''}:${skillName}` 复合键。这确保上下文压缩后模型仍记得加载了哪些 Skill，复合键防止跨 agent 的 Skill 覆写。
+
+---
+
+## 斜杠命令注入机制
+
+**源码坐标**: `src/commands/`、`src/hooks/useSlashCommands.ts`
+
+### 命令解析管道
+
+```
+用户输入 "/fix"
+  ↓
+1. 内置命令: /help, /context, /compact, /memory, /share 等
+  ↓ 无匹配
+2. Skill 命令: /fix → displayName="fix" 的 Skill
+  ↓ 无匹配
+3. 插件命令: /review-pr → 插件提供的命令
+  ↓ 无匹配
+4. 模糊匹配建议: "你是不是想用 /fix-lint？"
+```
+
+### 命令 → Skill 转换
+
+大多数斜杠命令其实底层是 Skill。`skillDefinitionToCommand()` 将 Skill 定义转换为 Command 对象，保留 `allowedTools`、`model`、`argumentHint` 等元数据。
+
+### 参数注入
+
+当 Skill 定义了 `argumentNames`，用户输入被分词并映射：
+- Skill frontmatter: `argumentNames: ["file", "task"]`
+- 用户: `/fix src/auth.ts "add error handling"`
+- 注入为: `file="src/auth.ts"`, `task="add error handling"`
 
 ---
 

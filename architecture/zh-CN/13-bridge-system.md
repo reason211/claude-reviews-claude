@@ -231,36 +231,24 @@ await writeBridgePointer(dir, {
 
 ---
 
-## 设计洞察
+## 可迁移设计模式
 
-### 为什么有两代传输协议？
+> 以下模式可直接应用于其他远程控制或分布式智能体系统。
 
-v1（WebSocket）是原始设计。v2（SSE+CCRClient）的引入是为了：
-1. **消除长连接** — SSE 可透明重连
-2. **添加投递跟踪** — `received/processing/processed` 状态增强可靠性
-3. **启用基于 Epoch 的冲突解决** — 多个 worker 不会冲突
-4. **降低服务器负载** — 批量 POST 写入 vs 逐条 WS 帧
+### 模式 1：基于 Epoch 的冲突解决
+**场景：** 重连后多个 worker 可能竞争同一会话。
+**实践：** 注册时分配单调递增的 epoch；对过期 epoch 的请求返回 409。
+**Claude Code 中的应用：** v2 传输使用 `worker_epoch`——409 触发传输拆除和重新轮询。
 
-### CapacityWake 模式
+### 模式 2：CapacityWake（基于 AbortController 的休眠中断）
+**场景：** 桥接在容量满时休眠，但需要在空位出现时立即响应。
+**实践：** 使用 `AbortController` 信号中断休眠计时器。
+**Claude Code 中的应用：** `capacityWake.wake()` 中断轮询休眠，桥接立即接受新工作。
 
-```typescript
-// 问题：桥接在容量满时休眠中
-// 解决：基于 AbortController 的唤醒信号
-capacityWake.wake()  // 会话结束 → 立即中断休眠
-```
-
-没有这个，桥接需要等待最多 `atCapMs`（可能是几分钟）才能发现有空位。
-
-### Bootstrap 隔离为何在此重要
-
-桥接代码小心避免从主 REPL 树导入。`auth.ts`、`config.ts`、`commands.ts` 等依赖通过回调注入：
-
-```typescript
-// 不是：import { createBridgeSession } from './createSession.ts'
-// 而是：createSession: (opts) => Promise<string | null>
-// 原因：createSession.ts 延迟加载的 auth/model/oauth 会拉入
-//       整个 REPL 树到 Agent SDK 包中
-```
+### 模式 3：回调注入实现 Bootstrap 隔离
+**场景：** 子系统（桥接）必须避免导入主模块树以保持包体积小。
+**实践：** 将依赖作为回调注入，而非直接导入。
+**Claude Code 中的应用：** `createSession` 注入为 `(opts) => Promise<string | null>`，避免将整个 REPL 树拉入 Agent SDK 包。
 
 ---
 
@@ -279,6 +267,4 @@ capacityWake.wake()  // 会话结束 → 立即中断休眠
 
 ---
 
-*系列完结。感谢阅读整个深度解析。*
-
-[← 第十二集 — 启动与引导](12-startup-bootstrap.md)
+[← 第十二集 — 启动与引导](12-startup-bootstrap.md) · [第十四集 — UI 与状态管理 →](14-ui-state-management.md)

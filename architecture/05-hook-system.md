@@ -86,6 +86,7 @@ graph TB
 Hooks can be implemented in three ways:
 
 ```typescript
+// 源码位置: src/utils/hooks.ts:45-55
 // 1. Command hooks — shell scripts
 { "type": "command", "command": "python validate.py" }
 
@@ -165,6 +166,7 @@ The matcher supports:
 ### Permission Matcher Pipeline
 
 ```typescript
+// 源码位置: src/Tool.ts:180-185
 // Each tool implements preparePermissionMatcher()
 // This creates a closure that tests patterns against tool input
 tool.preparePermissionMatcher(input)
@@ -218,6 +220,7 @@ The output schema is validated with Zod (`hookJSONOutputSchema`). Invalid JSON i
 A critical security mechanism prevents hooks from running in untrusted workspaces:
 
 ```typescript
+// 源码位置: src/utils/hooks.ts:4850-4860
 export function shouldSkipHookDueToTrust(): boolean {
   const isInteractive = !getIsNonInteractiveSession()
   if (!isInteractive) return false  // SDK mode: trust is implicit
@@ -236,6 +239,7 @@ This prevents a malicious `.claude/settings.json` in a cloned repo from executin
 Hooks can run asynchronously in the background:
 
 ```typescript
+// 源码位置: src/utils/hooks.ts:4920-4935
 // AsyncHookJSONOutput declares the hook wants background execution
 { "async": true, "asyncRewake": true }
 
@@ -257,6 +261,7 @@ registerPendingAsyncHook({
 When multiple hooks match the same event, their results are aggregated:
 
 ```typescript
+// 源码位置: src/utils/hooks.ts:4980-4995
 // Aggregation rules:
 // - Any "deny" → deny (most restrictive wins)
 // - Any "blocking" → stop
@@ -269,7 +274,9 @@ This means a plugin's security hook can block an operation even if another plugi
 
 ---
 
-## 8. Design Patterns Worth Stealing
+## Transferable Design Patterns
+
+> The following patterns can be directly applied to other agentic systems or CLI tools.
 
 ### Pattern 1: Exit Code as Control Flow
 

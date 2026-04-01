@@ -339,7 +339,9 @@ tools/AgentTool/
 
 ---
 
-## 7. Design Patterns Worth Stealing
+## Transferable Design Patterns
+
+> The following patterns from the Tool System can be directly applied to any plugin or extension architecture.
 
 ### Pattern 1: Behavioral Flags Over Capability Classes
 
@@ -367,6 +369,284 @@ The factory pattern ensures security by default — `isConcurrencySafe: false`, 
 
 ---
 
+## 8. Tool Pool Assembly: Where Prompt Cache Meets Economics
+
+> Why does tool ordering matter so much? Because a single MCP tool insertion in the wrong position can invalidate the entire prompt cache — costing 12x more input tokens per API call.
+
+// 源码位置: src/tools.ts:345-367
+
+### The Partition-Sort Strategy
+
+`assembleToolPool()` doesn't just merge tools — it enforces a strict partitioned sort order:
+
+```typescript
+export function assembleToolPool(permissionContext, mcpTools): Tools {
+  const builtInTools = getTools(permissionContext)
+  const allowedMcpTools = filterToolsByDenyRules(mcpTools, permissionContext)
+
+  // Partition-sort: built-ins as contiguous prefix, MCP as suffix
+  // A flat sort would interleave MCP into built-ins,
+  // invalidating all downstream cache keys
+  const byName = (a: Tool, b: Tool) => a.name.localeCompare(b.name)
+  return uniqBy(
+    [...builtInTools].sort(byName).concat(allowedMcpTools.sort(byName)),
+    'name',  // Built-in wins on name conflict (uniqBy preserves first)
+  )
+}
+```
+
+The server's `claude_code_system_cache_policy` places a global cache breakpoint after the last built-in tool. If MCP tools interleave into built-ins, every downstream cache key shifts — turning $0.003 cache-hit calls into $0.036 full-price calls.
+
+### Deny Rule Pre-filtering
+
+// 源码位置: src/tools.ts:262-269
+
+Tools are filtered **before being sent to the model** — not just at call time. The model never sees denied tools, avoiding wasted tokens on calls that would be rejected anyway.
+
+---
+
+## 9. Tool Search: Lazy Loading for the LLM Age
+
+> When MCP servers add dozens of tools, the model's prompt becomes overwhelming. ToolSearch provides an elegant solution: defer tools the model doesn't need yet, and let it discover them on demand.
+
+// 源码位置: src/tools.ts:247-249, Tool.ts shouldDefer/alwaysLoad
+
+### How Deferred Tools Work
+
+```mermaid
+graph LR
+    REG["getAllBaseTools()\n42+ tools"] --> SPLIT{"shouldDefer?"}
+    SPLIT -->|No| FULL["Full Schema\nSent to API"]
+    SPLIT -->|Yes| DEF["Deferred\nName only, no schema"]
+    DEF --> TS["Model calls\nToolSearchTool"]
+    TS --> DISC["Discover + Load\nFull schema available"]
+    DISC --> USE["Model calls\nthe real tool"]
+
+    style FULL fill:#27AE60,stroke:#333,color:#fff
+    style DEF fill:#E67E22,stroke:#333,color:#fff
+```
+
+| Field | Purpose |
+|-------|---------|
+| `shouldDefer` | Tool is sent with `defer_loading: true` — model sees the name but not the schema |
+| `alwaysLoad` | Never deferred, even when ToolSearch is active |
+| `searchHint` | Keywords for ToolSearch matching (e.g., `'jupyter'` for NotebookEditTool) |
+
+### The Schema-Not-Sent Problem
+
+// 源码位置: src/services/tools/toolExecution.ts:578-597
+
+When a model calls a deferred tool without discovering it first, typed parameters (arrays, numbers, booleans) arrive as strings — causing Zod validation failures. The system detects this and injects a helpful hint:
+
+```
+"This tool's schema was not sent to the API. Load it first:
+ call ToolSearchTool with query 'select:ToolName', then retry."
+```
+
+---
+
+## 10. Context Modification: Tools That Change the World
+
+> Some tools don't just produce output — they change the execution context itself. `cd` changes the working directory. How does the system handle this without breaking concurrent execution?
+
+// 源码位置: src/Tool.ts:321-336
+
+### The contextModifier Pattern
+
+```typescript
+export type ToolResult<T> = {
+  data: T
+  newMessages?: Message[]
+  contextModifier?: (context: ToolUseContext) => ToolUseContext
+  mcpMeta?: { _meta?, structuredContent? }
+}
+```
+
+A tool can return a `contextModifier` function that transforms the `ToolUseContext` for subsequent operations. For example, a `cd` command modifies the working directory via this mechanism.
+
+### The Concurrency Guard
+
+**Critical constraint**: `contextModifier` only takes effect for tools where `isConcurrencySafe() === false`. The reasoning is simple — if two tools run in parallel and both try to modify the context (e.g., both `cd` to different directories), the final state is nondeterministic. By restricting context modification to serial-only tools, the system eliminates this race condition by design.
+
+---
+
+## 11. The Execution Pipeline: From Model Output to Side Effects
+
+> A tool call is not a simple function invocation. It's a multi-stage pipeline with validation, permission checks, hooks, execution, result processing, and context modification — all orchestrated through an AsyncGenerator.
+
+// 源码位置: src/services/tools/toolExecution.ts:337-490, 599-800+
+
+### runToolUse() Entry Point
+
+```
+Model outputs tool_use block
+    │
+    ▼
+runToolUse() — AsyncGenerator<MessageUpdateLazy>
+    │
+    ├── 1. Find tool (name match → alias fallback → error)
+    │
+    ├── 2. Check abort signal
+    │       → If aborted: yield cancel message, return
+    │
+    └── 3. streamedCheckPermissionsAndCallTool()
+            │
+            ├── 4. Zod schema validation (inputSchema.safeParse)
+            │       → On failure: check if ToolSearch hint needed
+            │
+            ├── 5. tool.validateInput() — tool-specific validation
+            │
+            ├── 6. [BashTool] Speculative classifier start (parallel)
+            │
+            ├── 7. PreToolUse hooks (can modify input or block)
+            │
+            ├── 8. canUseTool() — permission decision
+            │       ├── allow → proceed
+            │       ├── deny → return error
+            │       └── ask → interactive prompt / coordinator
+            │
+            ├── 9. tool.call(input, context, canUseTool, msg, onProgress)
+            │
+            ├── 10. PostToolUse hooks (can modify output)
+            │
+            ├── 11. mapToolResultToToolResultBlockParam()
+            │
+            ├── 12. processToolResultBlock()
+            │        → Large results persisted to ~/.claude/tool-results/
+            │
+            └── 13. Apply contextModifier + inject newMessages
+```
+
+### Large Result Persistence
+
+// 源码位置: src/utils/toolResultStorage.ts
+
+When tool output exceeds `maxResultSizeChars`, the system writes it to disk and returns a preview with a file path. The model can then use `FileReadTool` to access the full output:
+
+| Tool | maxResultSizeChars |
+|------|--------------------|
+| BashTool | 30,000 |
+| FileEditTool | 100,000 |
+| GlobTool | 100,000 |
+| GrepTool | 100,000 |
+| FileReadTool | ∞ (has its own limits) |
+
+---
+
+## 12. Search Tools: GlobTool and GrepTool
+
+> These two tools provide the model's "find in project" capability — one for file discovery by pattern, one for content search by regex.
+
+### GlobTool
+
+// 源码位置: src/tools/GlobTool/GlobTool.ts
+
+```typescript
+export const GlobTool = buildTool({
+  name: GLOB_TOOL_NAME,
+  isConcurrencySafe: () => true,   // Pure read — safe for parallel execution
+  isReadOnly: () => true,          // No permission needed
+  maxResultSizeChars: 100_000,
+  async call({ pattern, path }, context) {
+    const searchPath = path ? expandPath(path) : getCwd()
+    const results = await glob(pattern, searchPath, {
+      maxResults: context.globLimits?.maxResults || 100,
+    })
+    return { data: { filenames: results, numFiles: results.length } }
+  }
+})
+```
+
+Results are sorted by modification time (most recently changed first) and capped at 100 files by default.
+
+### GrepTool
+
+// 源码位置: src/tools/GrepTool/GrepTool.ts
+
+Wraps `ripgrep` (rg) with safety constraints:
+- Results capped at 250 matches (`head_limit`) with `offset` for pagination
+- Automatic exclusion of `.git`, `.svn`, `node_modules`
+- Plugin cache exclusion patterns applied
+- Multiple output modes: content, files_with_matches, count
+- Context lines support (-A, -B, -C)
+
+Both tools are marked `isConcurrencySafe: true` and `isReadOnly: true` — meaning they can run in parallel without permission prompts.
+
+---
+
+## 13. File Tools: The Model's Hands on Your Codebase
+
+> The file tools form a trinity — Read, Edit, Write — each with distinct safety properties and a shared `FileStateCache` that prevents the model from overwriting your unsaved changes.
+
+### FileReadTool: Six Output Types, One Interface
+
+// 源码位置: src/tools/FileReadTool/FileReadTool.ts:337-718 (1,184 lines total)
+
+FileReadTool is the largest tool in the system. It's not just "read a file" — it's a polymorphic content ingestion engine:
+
+```typescript
+type Output =
+  | { type: 'text',           file: { content, numLines, startLine, totalLines } }
+  | { type: 'image',          file: { base64, type, originalSize, dimensions } }
+  | { type: 'notebook',       file: { filePath, cells } }
+  | { type: 'pdf',            file: { filePath, base64, originalSize } }
+  | { type: 'parts',          file: { filePath, count, outputDir } }  // large PDF → page images
+  | { type: 'file_unchanged', file: { filePath } }                    // dedup optimization
+```
+
+**Dedup optimization**: If the model reads the same file/range twice and the file hasn't changed (mtime match), it returns a `file_unchanged` stub instead of the full content. Internal telemetry shows ~18% of Read calls are same-file collisions — this saves significant `cache_creation` tokens.
+
+**Security constraints**:
+- Blocked device paths (`/dev/zero`, `/dev/random`, `/dev/stdin`) — would hang the process
+- UNC path check — prevents Windows NTLM credential leakage via SMB
+- `maxResultSizeChars: Infinity` — because persisting to disk for the model to re-read creates a circular dependency
+
+### FileEditTool: String Replacement with Stale Write Detection
+
+// 源码位置: src/tools/FileEditTool/FileEditTool.ts:86-595 (626 lines total)
+
+FileEditTool uses **string replacement**, not diff/patch. The model provides `old_string` and `new_string`:
+
+```typescript
+type Input = {
+  file_path: string
+  old_string: string    // must exist in file and be unique (or use replace_all)
+  new_string: string
+  replace_all?: boolean
+}
+```
+
+**The Stale Write Guard** (the most critical safety mechanism):
+
+```
+1. Model reads file → FileStateCache records { content, mtime }
+2. User edits file externally → mtime changes
+3. Model attempts edit → mtime > cached mtime → REJECT
+   "File has been modified since read. Read it again."
+```
+
+This prevents the model from overwriting your manual edits. On Windows, a content-comparison fallback handles false positives from cloud sync and antivirus timestamp bumps.
+
+**Validation pipeline** (8 checks before any write):
+1. Team memory secret detection (prevents API keys in shared memory)
+2. `old_string !== new_string` (no-op guard)
+3. Deny rule check (permission settings)
+4. File size limit (1 GiB — V8 string length boundary)
+5. Stale write detection (mtime + content comparison)
+6. `old_string` existence check
+7. Uniqueness check (non-`replace_all` mode)
+8. Settings file special validation
+
+### FileWriteTool: Create or Overwrite
+
+FileWriteTool is deliberately simple — it creates new files or completely overwrites existing ones. It shares the same permission pipeline as FileEditTool. Auto-creates parent directories. Use it when `old_string` would be the entire file content.
+
+### The FileStateCache: Shared State Across All Three
+
+All three tools share a `readFileState` Map keyed by absolute path. FileReadTool writes entries on read; FileEditTool checks entries before write and updates after write. This shared cache is what makes stale write detection possible across the Read→Edit workflow.
+
+---
+
 ## Summary
 
 | Aspect | Detail |
@@ -375,7 +655,13 @@ The factory pattern ensures security by default — `isConcurrencySafe: false`, 
 | **Registry** | Flat array in `getAllBaseTools()`, not a plugin system |
 | **Total tools** | 42+ built-in + unlimited MCP tools |
 | **Gating** | 3 layers: build flags (`bun:bundle`), env vars, runtime checks |
-| **Assembly** | `getAllBaseTools()` → deny filter → mode filter → MCP merge → sort |
+| **Assembly** | Partition-sort (built-in prefix + MCP suffix) for prompt cache stability |
 | **Schema** | Zod v4 for runtime validation + type inference |
 | **Convention** | One directory per tool, self-contained (impl + prompt + UI) |
 | **Defaults** | Fail-closed via `buildTool()` factory |
+| **ToolSearch** | Deferred tools → discover on demand → schema-not-sent detection |
+| **Execution** | 13-step pipeline: find → validate → hooks → permissions → call → hooks → persist |
+| **Context** | `contextModifier` — only for non-concurrent tools (race condition prevention) |
+| **Result Size** | Per-tool `maxResultSizeChars`; overflow → disk persistence + preview |
+| **File Tools** | Read (6 output types + dedup) / Edit (8-check validation + stale write guard) / Write (simple overwrite) |
+

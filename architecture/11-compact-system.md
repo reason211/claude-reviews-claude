@@ -58,6 +58,7 @@ MicroCompact (`microCompact.ts`, 531 lines) operates on every turn, surgically r
 ### Which Tools Get Compacted?
 
 ```typescript
+// 源码位置: src/utils/compact/microCompact.ts:35-48
 const COMPACTABLE_TOOLS = new Set([
   FILE_READ_TOOL_NAME,    // FileRead
   ...SHELL_TOOL_NAMES,    // Bash, PowerShell
@@ -235,6 +236,7 @@ After compaction, the system re-injects the most recently-read files (up to 5, b
 ### Threshold Calculation
 
 ```typescript
+// 源码位置: src/utils/compact/autoCompact.ts:25-35
 function getAutoCompactThreshold(model: string): number {
   const effectiveContextWindow = getEffectiveContextWindowSize(model)
   return effectiveContextWindow - AUTOCOMPACT_BUFFER_TOKENS  // - 13,000
@@ -266,6 +268,7 @@ function calculateTokenWarningState(tokenUsage, model) {
 ### Circuit Breaker
 
 ```typescript
+// 源码位置: src/utils/compact/autoCompact.ts:180-185
 const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 // BQ 2026-03-10: 1,279 sessions had 50+ consecutive failures
 // wasting ~250K API calls/day globally
@@ -317,36 +320,24 @@ The `'from'` direction is the cache-friendly option: the prompt cache for the ke
 
 ---
 
-## Design Insights
+## Transferable Design Patterns
 
-### Why Three Tiers?
+> The following patterns can be directly applied to other LLM-based systems or context management architectures.
 
-Each tier optimizes for a different scenario:
-- **MicroCompact**: Slow drip — tool results accumulate, but the conversation is still manageable. Surgical removal with cache preservation.
-- **Session Memory**: Medium pressure — context is growing past the threshold, but a pre-built summary exists. Skip the expensive LLM call.
-- **Full Compact**: High pressure or manual — compress everything with maximum fidelity.
+### Pattern 1: Multi-Tier Compression Pipeline
+**Scenario:** A growing context window needs management at different urgency levels.
+**Practice:** Layer surgical (per-turn), lightweight (pre-built summary), and heavy (LLM-powered) compaction tiers, each with increasing compression ratio and cost.
+**Claude Code application:** MicroCompact → Session Memory Compact → Full Compact.
 
-### The Analysis Scratchpad Pattern
+### Pattern 2: Analysis Scratchpad (Strip-Before-Inject)
+**Scenario:** An LLM summarization task benefits from chain-of-thought, but the output must be compact.
+**Practice:** Provide an `<analysis>` block for the model to think in, then strip it from the final output.
+**Claude Code application:** `formatCompactSummary()` strips `<analysis>` before injecting the summary.
 
-```
-<analysis>
-[Model's thought process for the summary — checking for completeness]
-</analysis>
-
-<summary>
-[The actual retained summary — this is what survives post-compact]
-</summary>
-```
-
-The `<analysis>` block is stripped by `formatCompactSummary()` before injection. This is a clever prompt engineering technique: giving the model a "scratch space" to organize its thoughts produces better summaries without inflating the post-compact context.
-
-### Compact Boundary Messages
-
-Every compaction inserts a `SystemCompactBoundaryMessage` — a metadata marker that:
-- Records pre-compact token count and trigger type (auto/manual)
-- Carries `preCompactDiscoveredTools` for deferred tool loading state
-- Contains `preservedSegment` metadata for session storage chain walks
-- Acts as a "firewall" — `getMessagesAfterCompactBoundary()` uses it to find the valid message range
+### Pattern 3: Circuit Breaker for Expensive Operations
+**Scenario:** A repeatedly failing expensive operation (API call) wastes resources.
+**Practice:** Track consecutive failures and stop retrying after N failures per session.
+**Claude Code application:** `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3` prevents runaway API calls.
 
 ---
 

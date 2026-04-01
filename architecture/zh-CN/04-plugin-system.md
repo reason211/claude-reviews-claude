@@ -155,16 +155,114 @@ graph TB
 
 ---
 
-## 8. 值得借鉴的设计模式
+## 8. Skill 系统架构
 
-### 模式 1：默认隔离 (Isolation by Default)
-每个插件都隔离加载。加载器将每个插件的加载过程封装在 `try/catch` 中，单独报告失败情况。一个插件崩溃绝不会连累其他插件。
+**源码坐标**: `src/skills/`、`src/commands/`
+
+Skill 是 Claude Code 的"提示即代码"系统 —— 每个 Skill 都是一个带 YAML frontmatter 的 Markdown 文件，定义了能力何时以及如何被激活。
+
+### 8.1 六层来源
+
+```typescript
+export type LoadedFrom =
+  | 'commands_DEPRECATED'  // 遗留 commands/ 目录（迁移路径）
+  | 'skills'               // .claude/skills/ 目录
+  | 'plugin'               // 通过插件安装
+  | 'managed'              // 企业管控配置
+  | 'bundled'              // CLI 内置 Skill
+  | 'mcp'                  // 运行时从 MCP 服务器发现
+```
+
+### 8.2 Skill Frontmatter
+
+每个 Skill 通过 YAML frontmatter 解析，支持以下字段：`displayName`、`description`、`allowedTools`（限制可用工具）、`whenToUse`（模型触发条件）、`executionContext`（`fork` = 隔离执行）、`agent`（绑定到特定代理类型）、`effort`（推理力度等级）等。
+
+### 8.3 内置 Skill 注册
+
+启动时程序化注册：`/update-config`、`/keybindings`、`/verify`、`/debug`、`/simplify`、`/batch`、`/stuck`。功能门控的特殊 Skill：`/loop`（需 `AGENT_TRIGGERS`）、`/claude-api`（需 `BUILDING_CLAUDE_APPS`）。
+
+### 8.4 Inline vs Fork 执行上下文
+
+| 上下文 | 行为 | 用例 |
+|--------|------|------|
+| **inline** | 注入提示到当前对话 | 简单命令、配置变更 |
+| **fork** | 在隔离子代理中运行，独立 token 预算 | 复杂任务、多步操作 |
+
+Fork 执行创建独立查询循环和消息历史，防止 Skill 执行污染主对话上下文。
+
+### 8.5 Token 预算管理
+
+Skill 列表占用约 1% 的上下文窗口。三级降级策略：1) 尝试完整描述；2) 超预算时内置 Skill 保留完整描述，其他截断；3) 极端情况仅显示名称。
+
+### 8.6 内置 Skill 文件安全
+
+使用 `O_NOFOLLOW | O_EXCL` 防止符号链接攻击，路径遍历验证阻止 `..` 逃逸。
+
+---
+
+## 9. 内置插件注册
+
+**源码坐标**: `src/plugins/`
+
+每个内置插件是 skills + hooks + MCP 服务器的**三元组**。`isAvailable` 函数支持环境感知激活（如 JetBrains 专用插件仅在检测到 JetBrains IDE 时激活）。
+
+启用/禁用逻辑：显式用户设置 > `defaultEnabled` > 默认启用。
+
+插件提供的 Skill 自动转换为斜杠命令：`getBuiltinPluginSkillCommands()` 遍历所有已启用插件，调用 `skillDefinitionToCommand()` 生成 Command 对象。
+
+---
+
+## 10. MCP 集成深化
+
+**源码坐标**: `src/services/mcp/client.ts`
+
+### 六种传输类型
+
+| 传输 | 协议 | 用例 |
+|------|------|------|
+| `stdio` | stdin/stdout | 本地 CLI 工具 |
+| `sse` | Server-Sent Events | 远程 HTTP 服务器 |
+| `http` | HTTP POST（可流式） | 无状态 API 服务器 |
+| `ws` | WebSocket | 双向流式 |
+| `sdk` | 进程内 SDK | 同进程工具 |
+| `sse-ide` | SSE 通过 IDE 代理 | IDE 桥接服务器 |
+
+### 工具发现 → 工具对象转换
+
+MCP 工具命名规则：`mcp__{serverName}__{toolName}`，自动注入 `assembleToolPool()` 中并保持稳定排序。
+
+---
+
+## 11. 后台安装管理器
+
+**源码坐标**: `src/utils/plugins/pluginInstallationManager.ts`
+
+采用**声明式协调模型**：不是命令式的"安装这个"，而是声明"这些插件应该存在"，管理器处理差异（安装缺失、清理多余、更新过期）。
+
+关键设计：
+- 每个安装步骤发射进度事件，被 ManagePlugins UI 消费
+- 一个插件安装失败不阻塞其他插件
+
+---
+
+## 可迁移设计模式
+
+> 以下来自插件系统的模式可直接应用于任何可扩展应用架构。
+
+### 模式 1：默认隔离
+每个插件隔离加载，一个崩溃不影响其他。
 
 ### 模式 2：带优先级的多源发现
-来自不同来源的插件合并时有明确的优先级规则。项目级别的插件会覆盖用户级别的插件。
+项目级别的插件覆盖用户级别。
 
 ### 模式 3：内容寻址缓存
-ZIP 缓存使用内容哈希作为键，不仅提高了安全性，还天然支持跨版本和多用户的去重。
+ZIP 缓存使用内容哈希作为键，支持跨版本去重。
+
+### 模式 4：提示即代码 (Skills)
+Markdown + YAML frontmatter = 可版本控制、可共享、可组合的能力。
+
+### 模式 5：声明式协调
+`PluginInstallationManager` 借鉴 Kubernetes Operator 的"期望状态 → 实际状态 → 差异 → 协调"模型，比命令式安装/卸载序列更健壮。
 
 ---
 

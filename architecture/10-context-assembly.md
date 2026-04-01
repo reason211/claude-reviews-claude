@@ -316,7 +316,9 @@ The total is compared against `getEffectiveContextWindowSize()` to show percenta
 
 ---
 
-## Design Insights
+## Transferable Design Patterns
+
+> The following patterns from the Context Assembly system can be directly applied to any LLM prompt engineering architecture.
 
 ### Why Memoize, Not Cache?
 
@@ -337,6 +339,120 @@ If attachment computation takes >1 second, it's aborted. This prevents slow file
 ### Memory File Change Detection
 
 The `contentDiffersFromDisk` flag on `MemoryFileInfo` enables a clever optimization: when a file's injected content differs from disk (due to comment stripping, frontmatter removal, or truncation), the raw content is preserved alongside. This lets the file state cache track changes without triggering unnecessary re-reads.
+
+---
+
+## Dynamic Attachment System Deep Dive
+
+**Source coordinates**: `src/utils/attachments.ts` (3,998 lines)
+
+### Deferred Tool Loading
+
+Plugin and MCP tools can arrive mid-session. The attachment system handles this through delta attachments:
+
+```typescript
+// 源码位置: src/utils/attachments.ts
+export type Attachment =
+  | { type: 'deferred_tools_delta'; tools: { added: ToolInfo[]; removed: ToolInfo[] } }
+  | { type: 'agent_listing_delta'; agents: AgentDelta[] }
+  | { type: 'mcp_instructions_delta'; server: string; instructions: string }
+  // ...30+ more types
+```
+
+When tools change (MCP server connects, plugin loads), the delta describes **what changed** rather than re-listing all tools. This keeps the injection compact and lets the model understand "you now have a new tool" rather than re-processing the entire tool pool.
+
+### System Prompt Section Registry & Cache
+
+Dynamic system prompt sections are managed through a registry that supports both static and computed content:
+
+```typescript
+// 源码位置: src/utils/systemPromptSectionRegistry.ts
+type SectionRegistry = Map<string, {
+  label: string
+  getSectionContent: () => string | null   // Computed per-call
+  isDynamic: boolean                       // After DYNAMIC_BOUNDARY?
+  scope: 'global' | 'session'             // Cache scope
+}>
+
+// Caching with unbinding:
+export function getSection(key: string): string | null {
+  const cached = STATE.systemPromptSectionCache.get(key)
+  if (cached !== undefined) return cached
+  
+  const content = registry.get(key)?.getSectionContent() ?? null
+  STATE.systemPromptSectionCache.set(key, content)
+  return content
+}
+
+// Cache is cleared on:
+// - /memory dialog changes
+// - Settings sync
+// - Worktree enter/exit
+// - Explicit resetSystemPromptSectionCache()
+```
+
+### Invoked Skill Preservation
+
+Skills invoked during a session have their content preserved in `STATE.invokedSkills`, keyed by `${agentId ?? ''}:${skillName}`. This ensures that after context compaction, the model still remembers which skills it loaded.
+
+```typescript
+// Skills survive compaction via:
+// 1. attachments.ts checks STATE.invokedSkills
+// 2. Re-injects skill content as 'invoked_skills' attachment type
+// 3. Composite key prevents cross-agent skill overwrites
+```
+
+---
+
+## Slash Command Injection Mechanism
+
+**Source coordinates**: `src/commands/`, `src/hooks/useSlashCommands.ts`
+
+Slash commands provide a user-facing entry point into both built-in features and Skills:
+
+### Command Resolution Pipeline
+
+```
+User types "/fix"
+  ↓
+1. Built-in commands: /help, /context, /compact, /memory, /share, etc.
+  ↓ No match
+2. Skill commands: /fix → skill with displayName="fix"
+  ↓ No match
+3. Plugin commands: /review-pr → plugin-provided command
+  ↓ No match
+4. Fuzzy match suggestions: "Did you mean /fix-lint?"
+```
+
+### Command → Skill Conversion
+
+Most slash commands are actually Skills under the hood:
+
+```typescript
+export function skillDefinitionToCommand(skill: SkillDefinition): Command {
+  return {
+    name: skill.displayName ?? skill.name,
+    description: skill.description,
+    execute: (args) => {
+      // Fork execution: spawn sub-agent with skill content as system prompt
+      // Or inline: inject skill content into current conversation
+    },
+    allowedTools: skill.allowedTools,
+    model: skill.model === 'inherit' ? undefined : skill.model,
+    argumentHint: skill.argumentHint,
+  }
+}
+```
+
+### Argument Injection
+
+When a Skill defines `argumentNames`, the user's input is tokenized and mapped:
+
+```typescript
+// Skill frontmatter: argumentNames: ["file", "task"]
+// User: /fix src/auth.ts "add error handling"
+// → Injected as: file="src/auth.ts", task="add error handling"
+```
 
 ---
 

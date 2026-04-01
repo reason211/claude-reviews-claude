@@ -138,6 +138,7 @@ Key design decisions:
 Before writing, `appendEntry()` checks if the UUID already exists in `getSessionMessages()`:
 
 ```typescript
+// 源码位置: src/utils/sessionStorage.ts:1820-1825
 const isNewUuid = !messageSet.has(entry.uuid)
 if (isAgentSidechain || isNewUuid) {
   void this.enqueueWrite(targetFile, entry)
@@ -196,6 +197,7 @@ loadConversationForResume(source)
 `buildConversationChain()` is the core traversal:
 
 ```typescript
+// 源码位置: src/utils/sessionStorage.ts:2180-2195
 let currentMsg = leafMessage
 while (currentMsg) {
   if (seen.has(currentMsg.uuid)) break  // cycle detection
@@ -238,6 +240,7 @@ This fires once per resume and feeds BigQuery monitoring for write→load drift 
 For the `--resume` session picker, reading full JSONL files would be prohibitively slow. The **lite path** reads only 64KB from head and tail:
 
 ```typescript
+// 源码位置: src/utils/sessionStoragePortable.ts:120-130
 export const LITE_READ_BUF_SIZE = 65536
 
 async function readHeadAndTail(filePath, fileSize, buf) {
@@ -351,44 +354,24 @@ Skips the stat pass entirely — reads all candidates, sorts on lite-read mtime.
 
 ---
 
-## Design Insights
+## Transferable Design Patterns
 
-### Why Append-Only JSONL?
+> The following patterns can be directly applied to other persistent log systems or CLI state management.
 
-- **Crash-safe**: Partial writes never corrupt earlier entries
-- **No locks needed**: Multiple readers can access concurrently (only one writer per session)
-- **Git-friendly**: Text-based, diffable, greppable (`cat ~/.claude/projects/*/abc123.jsonl | jq .type`)
-- **Streaming writes**: No serialization of the entire file on each message
+### Pattern 1: Append-Only JSONL for Crash Safety
+**Scenario:** A process crash must never corrupt previously persisted data.
+**Practice:** Write each entry as a self-contained JSON line; partial final writes are simply ignored on reload.
+**Claude Code application:** Session transcripts are append-only JSONL — no full-file rewrites during normal operation.
 
-### The 50MB Safety Rails
+### Pattern 2: 64KB Head/Tail Window for Fast Metadata
+**Scenario:** Listing thousands of session files requires metadata without full deserialization.
+**Practice:** Read only the first and last 64KB of each file; re-append metadata entries to EOF to keep them in the tail window.
+**Claude Code application:** `readHeadAndTail()` extracts title, prompt, and timestamps from 64KB slices.
 
-```typescript
-export const MAX_TRANSCRIPT_READ_BYTES = 50 * 1024 * 1024
-const MAX_TOMBSTONE_REWRITE_BYTES = 50 * 1024 * 1024
-```
-
-Sessions can grow to multiple GB. These limits prevent OOM on the read and tombstone paths — degrading gracefully instead of crashing.
-
-### Tombstone Optimization
-
-`removeMessageByUuid()` needs to delete a message (orphaned streaming attempt). Instead of reading the entire file:
-
-1. Read last 64KB
-2. Search for `"uuid":"target"` (not just the bare UUID — avoids matching `parentUuid`)
-3. Find line boundaries
-4. `ftruncate` + positional write to splice it out
-
-Falls back to full-file rewrite only if the target isn't in the tail — which is rare, since tombstones happen immediately after the failed write.
-
-### Pre-Boundary Metadata Scanning
-
-`scanPreBoundaryMetadata()` performs a forward scan of the JSONL file up to the compaction boundary, collecting only metadata lines. It operates at the **raw Buffer level** — no `readline`, no per-line string conversion for the ~99% of lines that are message content:
-
-- Pre-computes `METADATA_MARKER_BUFS` (Buffer versions of `'"type":"summary"'`, `'"type":"custom-title"'`, etc.)
-- Fast path: if a chunk contains zero markers (the common case), the entire chunk is skipped without line splitting
-- Only lines containing a marker are converted to strings and collected
-
-This avoids the O(n) string allocation cost on multi-GB session files where metadata entries are typically < 50 per session.
+### Pattern 3: Parent-UUID Chain for Branching History
+**Scenario:** Conversations can fork (subagents) or compact (truncation) and still be resumable.
+**Practice:** Each message carries `uuid` and `parentUuid`, forming a linked list that supports branching and compaction boundaries.
+**Claude Code application:** `buildConversationChain()` walks from leaf to root then reverses.
 
 ---
 

@@ -287,36 +287,24 @@ function groupMessagesByApiRound(messages: Message[]): Message[][] {
 
 ---
 
-## 设计洞察
+## 可迁移设计模式
 
-### 为什么需要三层？
+> 以下模式可直接应用于其他 LLM 系统或上下文管理架构。
 
-每层针对不同场景优化：
-- **微压缩**：缓慢滴漏 — 工具结果逐渐累积，但对话仍可管理。精准移除并保留缓存。
-- **会话记忆**：中等压力 — 上下文超过阈值，但已有预建摘要。跳过昂贵的 LLM 调用。
-- **完整压缩**：高压力或手动 — 以最高保真度压缩一切。
+### 模式 1：多层压缩流水线
+**场景：** 增长的上下文窗口需要在不同紧迫程度下进行管理。
+**实践：** 分层设计精准（每轮）、轻量（预建摘要）和重量级（LLM 驱动）压缩层，压缩率和成本递增。
+**Claude Code 中的应用：** 微压缩 → 会话记忆压缩 → 完整压缩。
 
-### 分析草稿本模式
+### 模式 2：分析草稿本（注入前剥离）
+**场景：** LLM 摘要任务受益于思维链，但输出必须紧凑。
+**实践：** 提供 `<analysis>` 块供模型思考，然后从最终输出中剥离。
+**Claude Code 中的应用：** `formatCompactSummary()` 在注入摘要前剥离 `<analysis>`。
 
-```
-<analysis>
-[模型的摘要思考过程 — 检查完整性]
-</analysis>
-
-<summary>
-[实际保留的摘要 — 压缩后幸存的内容]
-</summary>
-```
-
-`<analysis>` 块被 `formatCompactSummary()` 在注入前剥离。这是一个巧妙的提示词工程技巧：给模型一个"草稿空间"来组织思路，产生更好的摘要而不膨胀压缩后的上下文。
-
-### 压缩边界消息
-
-每次压缩都插入一个 `SystemCompactBoundaryMessage` —— 一个元数据标记，用于：
-- 记录压缩前 token 数和触发类型（auto/manual）
-- 携带 `preCompactDiscoveredTools` 用于延迟工具加载状态
-- 包含 `preservedSegment` 元数据用于会话存储链式遍历
-- 充当"防火墙" — `getMessagesAfterCompactBoundary()` 用它来找到有效的消息范围
+### 模式 3：昂贵操作的熔断器
+**场景：** 反复失败的昂贵操作（API 调用）浪费资源。
+**实践：** 追踪连续失败次数，超过 N 次后停止重试。
+**Claude Code 中的应用：** `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3` 防止失控的 API 调用。
 
 ---
 

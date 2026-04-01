@@ -1,0 +1,7 @@
+# Internal planning docs (not for public)
+docs/plan/
+docs/context/
+docs/task/
+
+# Competitor reference (never commit)
+competitor/

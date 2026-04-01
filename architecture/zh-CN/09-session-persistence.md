@@ -351,44 +351,24 @@ readSessionLite(filePath) → parseSessionInfoFromLite() → 过滤侧链
 
 ---
 
-## 设计洞察
+## 可迁移设计模式
 
-### 为什么选择仅追加 JSONL？
+> 以下模式可直接应用于其他持久化日志系统或 CLI 状态管理。
 
-- **崩溃安全**：部分写入永远不会损坏之前的条目
-- **无需锁定**：多个读取器可以并发访问（每个会话只有一个写入器）
-- **Git 友好**：基于文本，可 diff，可 grep（`cat ~/.claude/projects/*/abc123.jsonl | jq .type`）
-- **流式写入**：无需在每条消息时序列化整个文件
+### 模式 1：仅追加 JSONL 实现崩溃安全
+**场景：** 进程崩溃不能损坏已持久化的数据。
+**实践：** 每条条目作为自包含 JSON 行写入；重新加载时简单忽略不完整的末尾行。
+**Claude Code 中的应用：** 会话转录使用仅追加 JSONL，正常操作期间无需整文件重写。
 
-### 50MB 安全护栏
+### 模式 2：64KB 头尾窗口实现快速元数据
+**场景：** 列出数千个会话文件需要元数据但不能全量反序列化。
+**实践：** 只读取每个文件的头尾各 64KB；将元数据条目重追加到 EOF 以保持在尾部窗口内。
+**Claude Code 中的应用：** `readHeadAndTail()` 从 64KB 切片中提取标题、提示和时间戳。
 
-```typescript
-export const MAX_TRANSCRIPT_READ_BYTES = 50 * 1024 * 1024
-const MAX_TOMBSTONE_REWRITE_BYTES = 50 * 1024 * 1024
-```
-
-会话文件可以增长到数 GB。这些限制防止读取和墓碑路径上的 OOM —— 优雅降级而非崩溃。
-
-### 墓碑优化
-
-`removeMessageByUuid()` 需要删除一条消息（孤立的流式尝试）。无需读取整个文件：
-
-1. 读取最后 64KB
-2. 搜索 `"uuid":"target"`（不只是裸 UUID —— 避免匹配 `parentUuid`）
-3. 找到行边界
-4. `ftruncate` + 定位写入来拼接移除
-
-仅当目标不在尾部时才回退到整文件重写 —— 这种情况很少发生，因为墓碑操作紧跟在失败的写入之后。
-
-### 压缩边界前元数据扫描
-
-`scanPreBoundaryMetadata()` 对 JSONL 文件执行前向扫描（直到压缩边界），仅收集元数据行。它在**原始 Buffer 层面**操作 — 无 `readline`，对占 ~99% 的消息内容行无需字符串转换：
-
-- 预计算 `METADATA_MARKER_BUFS`（`'"type":"summary"'`、`'"type":"custom-title"'` 等的 Buffer 版本）
-- 快速路径：如果一个 chunk 不包含任何标记（常见情况），则跳过整个 chunk 而不进行行拆分
-- 仅将包含标记的行转换为字符串并收集
-
-这避免了在多 GB 会话文件上的 O(n) 字符串分配开销，而元数据条目通常每个会话不超过 50 条。
+### 模式 3：Parent-UUID 链实现分支历史
+**场景：** 对话可以分叉（子智能体）或压缩（截断），但仍需可恢复。
+**实践：** 每条消息携带 `uuid` 和 `parentUuid`，形成链表，支持分支和压缩边界。
+**Claude Code 中的应用：** `buildConversationChain()` 从叶节点遍历到根节点然后反转。
 
 ---
 

@@ -346,7 +346,9 @@ If prompt-too-long errors occur, reactive compaction can compress the conversati
 
 ---
 
-## 7. Design Patterns Worth Stealing
+## Transferable Design Patterns
+
+> The following patterns from QueryEngine can be directly applied to any system that orchestrates LLM interactions.
 
 ### Pattern 1: AsyncGenerator as Communication Protocol
 
@@ -396,6 +398,363 @@ Instead of counting errors (which breaks when the ring buffer rotates), the engi
 
 ---
 
+## 8. Cost and Token Tracking: Every Cent Accounted For
+
+> Every API call costs real money. The cost tracking system acts as the financial ledger of the entire session — accumulating costs per-model, integrating with OpenTelemetry, and persisting across session resumptions.
+
+// 源码位置: src/cost-tracker.ts:278-323
+
+### The Accumulation Pipeline
+
+Each time the API returns a response, `addToTotalSessionCost()` fires a multi-step accounting process:
+
+```typescript
+export function addToTotalSessionCost(
+  cost: number, usage: Usage, model: string,
+): number {
+  // 1. Update per-model usage map (input, output, cache read/write tokens)
+  const modelUsage = addToTotalModelUsage(cost, usage, model)
+  // 2. Increment global state counters
+  addToTotalCostState(cost, modelUsage, model)
+
+  // 3. Push to OpenTelemetry counters (if configured)
+  const attrs = isFastModeEnabled() && usage.speed === 'fast'
+    ? { model, speed: 'fast' } : { model }
+  getCostCounter()?.add(cost, attrs)
+  getTokenCounter()?.add(usage.input_tokens, { ...attrs, type: 'input' })
+  getTokenCounter()?.add(usage.output_tokens, { ...attrs, type: 'output' })
+
+  // 4. Recursive advisor cost — nested models (e.g., Haiku for classification)
+  let totalCost = cost
+  for (const advisorUsage of getAdvisorUsage(usage)) {
+    const advisorCost = calculateUSDCost(advisorUsage.model, advisorUsage)
+    totalCost += addToTotalSessionCost(advisorCost, advisorUsage, advisorUsage.model)
+  }
+  return totalCost
+}
+```
+
+### Per-Model Usage Map
+
+// 源码位置: src/cost-tracker.ts:250-276
+
+The system tracks usage at model granularity. Each model gets its own running tally:
+
+| Field | Source |
+|-------|--------|
+| `inputTokens` | `usage.input_tokens` |
+| `outputTokens` | `usage.output_tokens` |
+| `cacheReadInputTokens` | `usage.cache_read_input_tokens` |
+| `cacheCreationInputTokens` | `usage.cache_creation_input_tokens` |
+| `webSearchRequests` | `usage.server_tool_use?.web_search_requests` |
+| `costUSD` | Accumulated dollar cost |
+| `contextWindow` | Model-specific context window size |
+| `maxOutputTokens` | Model-specific max output limit |
+
+### Session Persistence and Restoration
+
+// 源码位置: src/cost-tracker.ts:87-175
+
+Costs survive session resumptions (`--resume`). When a session is saved, all accumulated state is written to the project config. On resume, `restoreCostStateForSession()` re-hydrates the counters — but **only if the session ID matches**. This prevents cross-session cost contamination:
+
+```typescript
+if (projectConfig.lastSessionId !== sessionId) {
+  return undefined  // Don't mix costs from different sessions
+}
+```
+
+---
+
+## 9. Error Recovery: The Art of Graceful Degradation
+
+> Error handling in the query loop is not an afterthought — it's the second-largest subsection of `query.ts`. The system implements a multi-layered retry and recovery architecture that turns transient failures into invisible blips.
+
+### The withRetry Engine
+
+// 源码位置: src/services/api/withRetry.ts:170-517
+
+`withRetry()` is an AsyncGenerator that wraps every API call with sophisticated retry logic:
+
+```
+API Call → Error?
+  ├── 429 (Rate Limited) → Retry with exponential backoff (base 500ms, max 32s)
+  ├── 529 (Overloaded)   → Retry if foreground source; bail if background
+  ├── 401 (Auth failed)  → Refresh OAuth token, clear API key cache, retry
+  ├── 403 (Token revoked) → Force token refresh, retry
+  ├── ECONNRESET/EPIPE   → Disable keep-alive, reconnect
+  ├── Context overflow    → Calculate safe max_tokens, retry
+  └── Other 5xx          → Standard exponential retry
+```
+
+### Foreground vs Background: Not All Queries Are Equal
+
+// 源码位置: src/services/api/withRetry.ts:57-89
+
+A critical optimization: **529 errors only retry for foreground queries**. Background tasks (summaries, title generation, classifiers) bail immediately on 529 to avoid amplifying a capacity cascade:
+
+```typescript
+// Only these sources retry on 529:
+const FOREGROUND_529_RETRY_SOURCES = new Set([
+  'repl_main_thread', 'sdk', 'compact',
+  'agent:custom', 'agent:default', 'agent:builtin',
+  'auto_mode', 'hook_agent', 'hook_prompt', ...
+])
+
+// Non-foreground → instant bail
+if (is529Error(error) && !shouldRetry529(options.querySource)) {
+  throw new CannotRetryError(error, retryContext)
+}
+```
+
+### Fallback Model Trigger
+
+// 源码位置: src/services/api/withRetry.ts:327-364
+
+After 3 consecutive 529 errors, the system triggers a `FallbackTriggeredError`. The query loop catches this, tombstones orphaned messages, strips thinking signatures (which are model-bound), and retries with the fallback model.
+
+### Persistent Retry Mode (UNATTENDED_RETRY)
+
+// 源码位置: src/services/api/withRetry.ts:91-104, 477-513
+
+For unattended sessions, the system retries 429/529 **indefinitely** with up to 5-minute backoff, chunking the wait into 30-second heartbeat intervals. Each heartbeat yields a `SystemAPIErrorMessage` so the host environment doesn't mark the session as idle:
+
+```typescript
+let remaining = delayMs
+while (remaining > 0) {
+  yield createSystemAPIErrorMessage(error, remaining, attempt, maxRetries)
+  const chunk = Math.min(remaining, HEARTBEAT_INTERVAL_MS)  // 30s
+  await sleep(chunk, options.signal, { abortError })
+  remaining -= chunk
+}
+```
+
+### max_output_tokens Recovery (Three-Stage Escalation)
+
+// 源码位置: src/query.ts:1188-1256
+
+When the model hits its output token limit, the loop escalates through three strategies:
+
+```
+Stage 1: Escalate to 64K tokens (one-shot upgrade)
+Stage 2: Inject recovery message (up to 3 attempts)
+         → "Output token limit hit. Resume directly — no apology, no recap."
+Stage 3: Recovery exhausted → surface the error to the user
+```
+
+The recovery message explicitly tells the model to avoid apologizing or recapping — because that wastes more tokens and makes the problem worse.
+
+---
+
+## 10. Streaming Architecture: Avoiding the O(n²) Trap
+
+> The choice between Anthropic's SDK-level `BetaMessageStream` and raw SSE processing isn't academic — it's a performance cliff that matters at scale.
+
+// 源码位置: src/services/api/claude.ts:1266-1280
+
+### Why Raw SSE Over SDK Streams?
+
+The SDK's `BetaMessageStream` accumulates content blocks by rebuilding the entire message object on each delta. For a response with 10,000 characters, this means O(n²) string concatenation. Claude Code instead processes the raw SSE stream directly:
+
+```
+SDK BetaMessageStream:  message_start → rebuild full message → delta → rebuild again → ...
+Raw SSE Processing:     content_block_delta → append only the delta → track state incrementally
+```
+
+The streaming pipeline uses an incremental state machine:
+1. `message_start` → Initialize message structure
+2. `content_block_start` → Create a new block (text, tool_use, or thinking)
+3. `content_block_delta` → Append delta text to the current block (O(1) per delta)
+4. `content_block_stop` → Finalize the block
+5. `message_stop` → Complete, extract usage stats
+
+### Stream Idle Watchdog
+
+// 源码位置: src/services/api/claude.ts (stream processing)
+
+A 90-second idle watchdog aborts streams that stall without producing data. This prevents the system from hanging indefinitely on a dead connection:
+
+```
+Stream data received → Reset timer
+90s without data → Abort signal → Retry via withRetry
+```
+
+---
+
+## 11. Context Collection: What Claude Knows About Your World
+
+> Before any API call, the system assembles a rich picture of the user's environment. This context is memoized, prefetched during idle windows, and security-gated to prevent untrusted code execution.
+
+// 源码位置: src/context.ts:116-189
+
+### Two Context Sources
+
+| Source | Function | Contents |
+|--------|----------|----------|
+| **System Context** | `getSystemContext()` | Git status, branch, recent log, user name |
+| **User Context** | `getUserContext()` | CLAUDE.md files, current date |
+
+### Git Status: Parallel Collection
+
+// 源码位置: src/context.ts:60-110
+
+Git metadata is collected with `Promise.all()` for maximum parallelism:
+
+```typescript
+const [branch, mainBranch, status, log, userName] = await Promise.all([
+  getBranch(),
+  getDefaultBranch(),
+  execFileNoThrow(gitExe(), ['--no-optional-locks', 'status', '--short'], ...),
+  execFileNoThrow(gitExe(), ['--no-optional-locks', 'log', '--oneline', '-n', '5'], ...),
+  execFileNoThrow(gitExe(), ['config', 'user.name'], ...),
+])
+```
+
+The `--no-optional-locks` flag is critical: it prevents git from acquiring the index lock, avoiding conflicts with the user's concurrent git operations.
+
+Status output is truncated at 2,000 characters — a dirty repo with hundreds of changed files shouldn't blow up the context window.
+
+### Memoize + Manual Invalidation
+
+Both context functions use lodash `memoize()` for "compute once, cache forever" semantics. When the underlying data changes (e.g., system prompt injection), the cache is manually cleared:
+
+```typescript
+export function setSystemPromptInjection(value: string | null): void {
+  systemPromptInjection = value
+  getUserContext.cache.clear?.()
+  getSystemContext.cache.clear?.()
+}
+```
+
+### Security-First Prefetching
+
+// 源码位置: src/main.tsx:360-380
+
+Git commands can execute arbitrary code through `core.fsmonitor` and `diff.external` hooks. The system only prefetches git context **after trust has been established**:
+
+```typescript
+function prefetchSystemContextIfSafe(): void {
+  if (isNonInteractiveSession) {
+    void getSystemContext()  // Non-interactive: trust is implicit
+    return
+  }
+  const hasTrust = checkHasTrustDialogAccepted()
+  if (hasTrust) void getSystemContext()
+  // Otherwise: DON'T prefetch — wait for trust
+}
+```
+
+---
+
+## 12. Message Normalization: The Invisible Translator
+
+> The internal message format and the API wire format are not the same thing. `normalizeMessagesForAPI()` bridges this gap — merging, filtering, and transforming messages into what the API expects, all while preserving prompt cache integrity.
+
+// 源码位置: src/utils/messages.ts:1989+
+
+### What Normalization Does
+
+```
+Internal Messages → normalizeMessagesForAPI() → API-ready Messages
+  - Merge consecutive same-role messages
+  - Filter out progress/system/tombstone messages
+  - Strip deferred tool schemas (ToolSearch optimization)
+  - Normalize tool inputs for API compatibility
+  - Handle thinking block placement constraints
+```
+
+### The Immutable Message Principle
+
+// 源码位置: src/query.ts:747-787
+
+Messages sent to the API must remain byte-identical across turns — any change invalidates the prompt cache. The system enforces this through clone-before-yield:
+
+```typescript
+// Original message is NEVER mutated — it flows back to the API as-is
+let yieldMessage = message
+if (message.type === 'assistant') {
+  // Only clone if backfill adds NEW fields (not overwrites)
+  const addedFields = Object.keys(inputCopy).some(k => !(k in block.input))
+  if (addedFields) {
+    clonedContent ??= [...message.message.content]
+    yieldMessage = { ...message, message: { ...message.message, content: clonedContent } }
+  }
+}
+```
+
+### Thinking Block Constraints
+
+The API enforces three strict rules for thinking blocks that `normalizeMessagesForAPI()` must respect:
+
+| Rule | Constraint | Penalty for Violation |
+|------|-----------|----------------------|
+| **Thinking requires budget** | Messages containing thinking blocks must appear in queries with `max_thinking_length > 0` | 400 error |
+| **Thinking can't be last** | A thinking block must NOT be the final block in a message | 400 error |
+| **Thinking persists across tool use** | Thinking blocks must be preserved throughout the assistant's trace — spanning tool_use/tool_result boundaries | Silent corruption |
+
+As the source code comments put it: _"不遵守这些规则的惩罚：一整天的调试和揪头发。"_ (Penalty for violating these rules: a full day of debugging and hair-pulling.)
+
+---
+
+## 13. CLI Bootstrap: From Binary to Query Loop
+
+**Source coordinates**: `src/entrypoints/cli.tsx` (303 lines, 39KB)
+
+Before `QueryEngine` ever runs, the CLI entrypoint decides *what* to run. This is not a simple argument parser — it's a **multi-path dispatcher** optimized for startup latency.
+
+### The Fast-Path Architecture
+
+```typescript
+async function main(): Promise<void> {
+  const args = process.argv.slice(2)
+
+  // Fast-path 1: --version → zero imports, instant exit
+  if (args[0] === '--version') { console.log(MACRO.VERSION); return }
+
+  // Fast-path 2: --dump-system-prompt → minimal imports
+  // Fast-path 3: --claude-in-chrome-mcp → MCP server mode
+  // Fast-path 4: --computer-use-mcp → Computer Use MCP
+  // Fast-path 5: --daemon-worker → lean worker (no configs/analytics)
+  // Fast-path 6: remote-control|rc|bridge → Bridge mode
+  // Fast-path 7: daemon → long-running supervisor
+  // Fast-path 8: ps|logs|attach|kill|--bg → background sessions
+  // Fast-path 9: new|list|reply → template jobs
+  // Fast-path 10: environment-runner → headless BYOC
+  // Fast-path 11: self-hosted-runner → self-hosted polling
+  // Fast-path 12: --worktree --tmux → exec into tmux
+  // ...
+  // Default: load full CLI → cliMain() → QueryEngine
+}
+```
+
+### Three Design Principles
+
+**1. Dynamic `import()` everywhere**: Every fast-path uses `await import()` instead of top-level imports. The `--version` path has **zero module imports** — it prints `MACRO.VERSION` (build-time inlined) and exits instantly.
+
+**2. `feature()` gates for dead code elimination**: Each fast-path is wrapped in `feature('FLAG')` checks. At build time, Bun's bundler eliminates entire code blocks for disabled features, so external builds never include internal-only paths like `ABLATION_BASELINE` or `DAEMON`.
+
+**3. `profileCheckpoint()` for startup instrumentation**: Every path records its checkpoint — enabling precise startup latency measurement across all entry vectors.
+
+### The Ablation Baseline Easter Egg
+
+```typescript
+// Inlined here (not init.ts) because BashTool/AgentTool capture
+// module-level consts at import time — init() runs too late
+if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
+  for (const k of [
+    'CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_DISABLE_THINKING',
+    'DISABLE_INTERLEAVED_THINKING', 'DISABLE_COMPACT',
+    'DISABLE_AUTO_COMPACT', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
+    'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
+  ]) {
+    process.env[k] ??= '1'
+  }
+}
+```
+
+This is a **harness-science L0 ablation** — it strips every intelligent optimization (thinking, compact, auto-memory, background tasks) to measure the raw LLM baseline. It must run before any module evaluation because tools capture env vars into constants at import time.
+
+---
+
 ## Summary
 
 | Aspect | Detail |
@@ -405,5 +764,10 @@ Instead of counting errors (which breaks when the ring buffer rotates), the engi
 | **Communication** | Pure AsyncGenerator — no callbacks, no events |
 | **Pre-processing** | 5-stage compression pipeline (budget → snip → MC → collapse → autocompact) |
 | **Budget limits** | USD, turns, tokens — all enforced in the loop |
-| **Error recovery** | Fallback model, max-output retry (3x), reactive compaction |
+| **Error recovery** | withRetry (429/529/401 matrix), fallback model, max-output escalation (3x), persistent retry |
+| **Cost tracking** | Per-model `addToTotalSessionCost()`, OpenTelemetry counters, session-scoped persistence |
+| **Streaming** | Raw SSE over SDK streams (avoids O(n²)), 90s idle watchdog |
+| **Context** | Memoized git parallel collection, security-gated prefetch, 2K status truncation |
+| **Messages** | `normalizeMessagesForAPI()` — immutable originals, clone-before-yield, thinking block rules |
 | **Key principle** | "Dumb scaffold, smart model" — the loop is simple, intelligence is in the LLM |
+

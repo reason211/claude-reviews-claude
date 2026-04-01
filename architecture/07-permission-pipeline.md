@@ -59,6 +59,7 @@ The core function `hasPermissionsToUseToolInner()` implements a **strictly order
 ### Step 1a: Tool-Level Deny Rules
 
 ```typescript
+// 源码位置: src/utils/permissions/permissions.ts:85-90
 const denyRule = getDenyRuleForTool(appState.toolPermissionContext, tool)
 if (denyRule) return { behavior: 'deny', ... }
 ```
@@ -178,6 +179,7 @@ graph LR
 Rules are loaded from **7 sources**, evaluated in a flat list:
 
 ```typescript
+// 源码位置: src/utils/permissions/permissionsLoader.ts:12-20
 const PERMISSION_RULE_SOURCES = [
   ...SETTING_SOURCES,  // userSettings, projectSettings, localSettings,
                        // policySettings, flagSettings
@@ -304,6 +306,7 @@ Stripped rules are **stashed** and restored when leaving auto mode.
 ### Consecutive Denial Limits
 
 ```typescript
+// 源码位置: src/utils/permissions/denialTracking.ts:5-10
 export const DENIAL_LIMITS = {
   maxConsecutive: 3,   // 3 consecutive blocks → fall back to prompting
   maxTotal: 20,        // 20 total blocks per session → fall back
@@ -426,30 +429,173 @@ flowchart TD
 
 ---
 
-## 9. Design Insights
+## Transferable Design Patterns
 
-### Why Seven Steps, Not Three?
+> The following patterns can be directly applied to other AI agent permission systems or security pipelines.
 
-The pipeline's granularity exists because different callers (rules, tools, safety checks) need different bypass behavior:
+### Pattern 1: Ordered Pipeline with Bypass-Immune Safety Checks
+**Scenario:** Different rule sources need different override semantics.
+**Practice:** Structure permission evaluation as a strictly ordered pipeline where some steps are immune to all bypass modes.
+**Claude Code application:** Steps 1d-1g fire even in `bypassPermissions` mode.
 
-- **Deny rules** (1a): Never overridable
-- **Ask rules** (1b): Overridable by sandbox
-- **Tool checks** (1c): Overridable by bypass mode
-- **Safety checks** (1g): Never overridable, even by bypass
+### Pattern 2: Classifier Sees Tools, Not Text
+**Scenario:** An AI safety classifier might be influenced by the model's own persuasive output.
+**Practice:** Strip assistant text from the classifier's input transcript, including only structured tool_use blocks.
+**Claude Code application:** The YOLO classifier transcript excludes assistant text to prevent social-engineering attacks.
 
-A simpler "deny/allow/ask" model couldn't express "this should prompt even when the user said bypass everything."
+### Pattern 3: Reversible Permission Stripping
+**Scenario:** Entering a high-automation mode shouldn't permanently destroy manual permission rules.
+**Practice:** Stash stripped rules on mode entry, restore them on mode exit.
+**Claude Code application:** Dangerous `Bash(*)` rules are stashed when entering auto mode and restored when leaving.
 
-### The Classifier Sees Tools, Not Text
+### Pattern 4: Denial Circuit Breakers
+**Scenario:** A blocked action causes infinite retry loops.
+**Practice:** Track consecutive and total denials; exceed limits triggers fallback (human intervention or clean shutdown).
+**Claude Code application:** 3 consecutive or 20 total denials trigger mode fallback.
 
-By stripping assistant text from the transcript and only including tool_use blocks, the classifier is immune to social engineering attacks where the model crafts persuasive text to influence its own permission checks.
+---
 
-### Permission Stripping Is Reversible
+## 10. OAuth 2.0 Authentication Pipeline
 
-When entering auto mode, dangerous permissions (like `Bash(*)`) are stripped and stashed. When leaving, they're restored. This means auto mode is a safe experiment — users can try it without permanently losing their allow rules.
+**Source coordinates**: `src/services/oauth/client.ts`, `src/auth/`
 
-### Denial Tracking Prevents Infinite Loops
+The permission system's authority begins with identity verification. Claude Code supports two authentication paths:
 
-Without denial limits (3 consecutive, 20 total), a blocked action could cause the model to retry endlessly. The circuit breaker ensures either human intervention (interactive) or clean shutdown (headless).
+### Dual Authentication Paths
+
+| Path | Method | Token Type |
+|------|--------|------------|
+| **Console API Key** | `ANTHROPIC_API_KEY` env var or config | Static key, no expiry management |
+| **Claude.ai OAuth** | PKCE Authorization Code flow | JWT with refresh, 1h expiry |
+
+### PKCE Flow
+
+```
+User → buildAuthUrl(codeChallenge) → Browser opens authorization URL
+Browser → Callback with auth code → exchangeCodeForToken(code, codeVerifier)
+Token → SecureStorage (Keychain on macOS) → refreshToken on expiry
+```
+
+Key security properties:
+- **PKCE (S256)**: Prevents authorization code interception — the `code_verifier` is generated client-side and never sent to the authorization server until exchange
+- **Token lifecycle**: Access tokens expire at ~1h; refresh tokens are stored in SecureStorage and automatically refreshed before expiry
+- **Revocation handling**: Expired/revoked tokens trigger re-authentication rather than silent failure
+
+### Token Refresh Scheduling
+
+```typescript
+// Bridge sessions use a generation counter to prevent stale refresh races
+export function createTokenRefreshScheduler({
+  getAccessToken, onRefresh, label, refreshBufferMs = 5 * 60 * 1000,
+}): { schedule, cancel, cancelAll } {
+  // 1. Decode JWT payload → extract exp claim
+  // 2. Schedule refresh 5 minutes before expiry
+  // 3. Retry up to 3 times on failure
+  // 4. Generation counter prevents concurrent doRefresh conflicts
+}
+```
+
+---
+
+## 11. Settings Multi-Source Merge System
+
+**Source coordinates**: `src/utils/settings/settings.ts`, `src/utils/settings/constants.ts`
+
+The permission pipeline's rules come from a sophisticated five-layer settings system (detailed in Episode 16), but the permission-specific aspects deserve coverage here.
+
+### Permission Rule Loading
+
+```typescript
+// Rules are loaded from ALL settings sources + runtime sources
+const PERMISSION_RULE_SOURCES = [
+  ...SETTING_SOURCES,  // user/project/local/flag/policy
+  'cliArg',            // --allowed-tools, --disallowed-tools
+  'command',           // Skill-injected rules
+  'session',           // Runtime additions via permission dialog
+]
+
+// Each source provides deny/allow/ask arrays
+// Denial rules from ANY source take absolute precedence
+// Allow rules accumulate across all sources
+```
+
+### Enterprise Managed Permissions
+
+Enterprise policy settings (`policySettings`) have a special property: they **cannot be overridden** by lower-priority sources. When a policy denies a tool, no amount of project or user settings can re-allow it:
+
+```typescript
+// Policy deny rules are checked FIRST in the pipeline
+// They cannot be bypassed, even by bypassPermissions mode
+// This enables IT departments to enforce security boundaries
+```
+
+### The `disableBypassPermissionsMode` Setting
+
+Enterprise deployments can completely disable bypass mode:
+
+```typescript
+permissions: {
+  disableBypassPermissionsMode: 'disable',  // Removes the option entirely
+  deny: [
+    { tool: 'Bash', content: 'rm -rf:*' },  // Policy-level deny
+  ]
+}
+```
+
+---
+
+## 12. Secure Credential Storage
+
+**Source coordinates**: `src/utils/secureStorage/`
+
+OAuth tokens and API keys are stored through a platform-adaptive secure storage system:
+
+### Platform Adaptation Chain
+
+```
+macOS?
+  ├─ Yes → createFallbackStorage(macOsKeychain, plainText)
+  │         ├─ Try macOS Keychain (security CLI)
+  │         └─ Fallback: plaintext if Keychain fails
+  └─ No  → plainTextStorage (Linux/Windows)
+```
+
+### Stale-While-Error Strategy
+
+The most important pattern for credential storage resilience:
+
+```typescript
+// macOsKeychainStorage.ts
+read(): SecureStorageData | null {
+  if (Date.now() - prev.cachedAt < KEYCHAIN_CACHE_TTL_MS) {
+    return prev.data  // Serve from cache
+  }
+  try {
+    const result = execSyncWithDefaults_DEPRECATED(
+      `security find-generic-password -a "${username}" -w -s "${storeName}"`
+    )
+    // Parse and cache result
+  } catch {
+    // CRITICAL: Don't return null on failure
+    // Serve stale cached data instead
+    if (prev.data !== null) {
+      keychainCacheState.cache = { data: prev.data, cachedAt: Date.now() }
+      return prev.data  // Stale but functional
+    }
+  }
+}
+```
+
+Without stale-while-error, a transient macOS Keychain Service restart would cause every in-flight request to fail with "Not logged in," forcing users to re-authenticate after a brief system hiccup.
+
+### The 4096-Byte stdin Limit
+
+```typescript
+// macOS security command has an undocumented stdin limit
+const SECURITY_STDIN_LINE_LIMIT = 4096 - 64  // 64B safety margin
+// Exceeding this causes SILENT data truncation → credential corruption
+// This forced the design choice to minimize stored credential size
+```
 
 ---
 

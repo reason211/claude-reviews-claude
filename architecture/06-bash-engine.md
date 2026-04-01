@@ -58,6 +58,7 @@ graph TB
 The entry point is `BashTool.tsx` — a 1144-line tool definition built with the standard `buildTool()` pattern. Its input schema is deceptively simple:
 
 ```typescript
+// 源码位置: src/tools/BashTool/BashTool.tsx:45-54
 z.strictObject({
   command: z.string(),
   timeout: semanticNumber(z.number().optional()),
@@ -99,6 +100,7 @@ For compound commands (`ls && echo "---" && ls dir2`), **all** parts must be sea
 The heart of execution is an **AsyncGenerator** — a design that elegantly unifies progress reporting with command completion:
 
 ```typescript
+// 源码位置: src/tools/BashTool/BashTool.tsx:200-280
 async function* runShellCommand({
   input, abortController, setAppState, ...
 }): AsyncGenerator<ProgressUpdate, ExecResult, void> {
@@ -156,6 +158,7 @@ The `sleep` command is specifically blocked from auto-backgrounding — it runs 
 Claude Code is opinionated about which shells it supports:
 
 ```typescript
+// 源码位置: src/utils/Shell.ts:30-50
 export async function findSuitableShell(): Promise<string> {
   // 1. Check CLAUDE_CODE_SHELL override (must be bash or zsh)
   // 2. Check $SHELL (must be bash or zsh)
@@ -236,6 +239,7 @@ stateDiagram-v2
 Background tasks write directly to a file fd with **no JS involvement**. A stuck append loop once filled 768GB of disk. The fix:
 
 ```typescript
+// 源码位置: src/utils/ShellCommand.ts:310-325
 #startSizeWatchdog(): void {
   this.#sizeWatchdog = setInterval(() => {
     void stat(this.taskOutput.path).then(s => {
@@ -317,6 +321,7 @@ User commands are wrapped in `eval '<command>'` to enable a second parsing pass 
 Settings are converted to `SandboxRuntimeConfig`:
 
 ```typescript
+// 源码位置: src/utils/sandbox/sandbox-adapter.ts:120-160
 function convertToSandboxRuntimeConfig(settings): SandboxRuntimeConfig {
   // 1. Extract network domains from WebFetch permission rules
   // 2. Extract filesystem paths from Edit/Read rules
@@ -410,15 +415,19 @@ sequenceDiagram
 
 ---
 
-## 8. Design Insights
+## Transferable Design Patterns
 
-### Why Merge stdout and stderr?
+> The following patterns can be directly applied to other CLI tools or process orchestration systems.
 
-By piping both to the same file fd, Claude Code avoids the classic race condition where stdout and stderr from concurrent writes arrive out of order. The comments explain: *"On POSIX, O_APPEND makes each write atomic (seek-to-end + write), so stdout and stderr are interleaved chronologically without tearing."*
+### Pattern 1: Merge stdout and stderr into a Single fd
+**Scenario:** Concurrent writes to separate stdout/stderr pipes arrive out of order.
+**Practice:** Piping both to the same file descriptor with `O_APPEND` ensures chronological interleaving without tearing.
+**Claude Code application:** `spawn(shell, args, { stdio: ['pipe', outputHandle.fd, outputHandle.fd] })`.
 
-### The Claude Code Hints Protocol
-
-When commands run with `CLAUDECODE=1` in the environment, CLIs/SDKs can emit a `<claude-code-hint />` tag to stderr. BashTool scans for these, records them for plugin hint recommendations, then **strips them** so the model never sees the tag — a **zero-token side channel**:
+### Pattern 2: Zero-Token Side Channel
+**Scenario:** CLI tools need to communicate metadata (hints, plugin suggestions) without inflating the LLM's context window.
+**Practice:** Emit structured tags to stderr, scan and strip them before passing output to the model.
+**Claude Code application:** `<claude-code-hint />` tags in stderr are extracted by `extractClaudeCodeHints()` then stripped — the model never sees them.
 
 ```typescript
 const extracted = extractClaudeCodeHints(strippedStdout, input.command)
@@ -428,9 +437,10 @@ if (isMainThread && extracted.hints.length > 0) {
 }
 ```
 
-### AsyncGenerator for Progress: Elegant Simplicity
-
-The `runShellCommand()` generator pattern is worth studying. Instead of callbacks, event emitters, or rxjs observables, a simple `yield` in a `while(true)` loop produces progress updates. The caller consumes them with a standard `do/while + .next()` loop. The `Promise.race([resultPromise, progressSignal])` pattern cleanly handles both completion and progress in a single await.
+### Pattern 3: AsyncGenerator for Progress Reporting
+**Scenario:** Long-running subprocess needs to report incremental progress while still delivering a final result.
+**Practice:** Use an `AsyncGenerator` — `yield` produces progress updates, `return` delivers the final result. The consumer uses `Promise.race([resultPromise, progressSignal])` to handle both in a single await.
+**Claude Code application:** `runShellCommand()` yields progress every 1s while the command runs, then returns `ExecResult` on completion.
 
 ---
 

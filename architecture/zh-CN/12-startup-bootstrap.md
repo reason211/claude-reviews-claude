@@ -290,27 +290,24 @@ main_after_run                     →  ~1000ms（REPL 就绪）
 
 ---
 
-## 设计洞察
+## 可迁移设计模式
 
-### 为什么到处用动态导入？
+> 以下模式可直接应用于其他 CLI 工具或进程引导系统。
 
-CLI 工具的启动预算约 1 秒。Claude Code 的完整模块树有 200+ 个文件。动态导入让每个快速路径只加载所需的：
+### 模式 1：动态导入的快速路径级联
+**场景：** CLI 工具有约 1 秒的启动预算，但模块树有 200+ 个文件。
+**实践：** 使用动态 `await import()` 创建快速路径级联，每条路径只加载所需模块。
+**Claude Code 中的应用：** `--version` 加载 0 个导入（约 5ms），`--daemon-worker` 加载约 10 个（约 50ms），正常启动加载 200+（约 500-1000ms）。
 
-- `--version`：0 个导入，约 5ms
-- `--daemon-worker`：约 10 个导入，约 50ms
-- 正常交互：200+ 个导入，约 500-1000ms
+### 模式 2：全局状态的 DAG 叶节点
+**场景：** 全局状态单例如果从模块树导入，会导致循环依赖。
+**实践：** 让状态模块成为依赖图的叶节点——几乎不导入任何东西，用 lint 规则强制执行。
+**Claude Code 中的应用：** `bootstrap/state.ts` 仅导入 `crypto`/`lodash`/`process`；ESLint `bootstrap-isolation` 规则阻止更深层导入。
 
-### DAG 叶节点模式
-
-`bootstrap/state.ts` 是模块依赖图的**叶节点** —— 它几乎不导入任何东西（`crypto`、`lodash`、`process`）。ESLint 规则（`bootstrap-isolation`）强制执行此约束，防止创建循环依赖。
-
-### 预连接 vs 预取
-
-两种不同的预热策略：
-- **预连接**（`apiPreconnect.ts`）：TCP+TLS 握手 —— 在首次 API 调用时节省约 100-200ms
-- **预取**（`setup.ts`）：命令、插件、钩子 —— 在首次用户交互时节省约 200ms
-
-两者都使用发射即忘模式，不阻塞启动路径。
+### 模式 3：预连接 vs 预取
+**场景：** 启动时需要预热多种资源（网络、数据），但不能阻塞。
+**实践：** 分离 TCP+TLS 预连接（发射即忘 HEAD）和数据预取（发射即忘异步调用），两者均非阻塞。
+**Claude Code 中的应用：** `preconnectAnthropicApi()` 在首次 API 调用时节省约 100-200ms；`void getCommands()` 并行预取数据。
 
 ---
 

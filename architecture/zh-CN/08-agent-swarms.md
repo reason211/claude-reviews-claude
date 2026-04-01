@@ -188,7 +188,9 @@ graph TB
 
 ---
 
-## 7. 设计洞察
+## 可迁移设计模式
+
+> 以下来自 Swarm 系统的模式可直接应用于任何多智能体或分布式协调架构。
 
 ### 为什么用文件邮箱？
 
@@ -205,6 +207,94 @@ graph TB
 - 工人不能创建团队或批准自己的计划
 - 关闭始终由领导发起，工人确认
 - 权限委托始终是 工人 → 领导 → 工人
+
+---
+
+## 8. 协调器模式
+
+**源码坐标**: `src/coordinator/coordinatorMode.ts`
+
+协调器模式将领导从任务分发者转变为**综合引擎** —— 它不仅仅是委派工作，还要理解和整合结果。
+
+### 激活：双重门控
+
+构建时特性标志 AND 运行时环境变量必须同时启用。恢复会话时，`matchSessionMode()` 自动翻转变量以匹配恢复会话的模式。
+
+### 协调器工作流
+
+```
+研究（工人，并行）→ 综合（协调器整合发现）→ 实现（工人，按文件集串行）→ 验证（工人，并行）
+```
+
+核心原则：
+- **协调器拥有综合权** —— 不做"基于你的发现"式委派；协调器必须理解并重述
+- **并行是超能力** —— 独立工人并发运行
+- **读写隔离** —— 研究任务并行，写操作按文件集串行
+
+---
+
+## 9. 任务类型联合（7 种变体）
+
+**源码坐标**: `src/tasks/`
+
+每个后台任务由七种状态变体之一表示：
+
+```typescript
+export type TaskState =
+  | LocalShellTaskState         // 本地 shell 命令
+  | LocalAgentTaskState         // 通过 AgentTool 的子代理
+  | RemoteAgentTaskState        // 远程 CCR 代理
+  | InProcessTeammateTaskState  // 同进程团队成员
+  | LocalWorkflowTaskState      // 本地工作流
+  | MonitorMcpTaskState         // MCP 服务器监控
+  | DreamTaskState              // 自动记忆整理
+```
+
+### 完成通知
+
+代理完成时注入 `<task-notification>` XML，包含 `task-id`、`status`（completed/failed/killed）、`result`（最终文本响应）和 `usage` 统计。因为作为 `user` 类型消息注入，LLM 在对话流中自然处理它。
+
+---
+
+## 10. Agent 间通信协议
+
+**源码坐标**: `src/tools/SendMessageTool/`
+
+### 结构化消息类型
+
+除纯文本外，代理可以交换带类型的控制消息：`shutdown_request`、`shutdown_response`、`plan_approval_response`。
+
+### 消息路由
+
+```
+SendMessage(to="researcher", message="...")
+  ↓
+进程内队友？ → 直接 pendingMessages
+  ↓ 否
+本地代理？ → queuePendingMessage → 在工具轮次边界消费
+  ↓ 否
+窗格（tmux/iterm2）？ → 文件系统邮箱
+  ↓ 否
+UDS/Bridge？ → socket/bridge 传输
+  ↓ 否
+"*"（广播）？ → 遍历所有团队成员，逐个发送
+```
+
+### 跨会话通信（UDS）
+
+启用 `feature('UDS_INBOX')` 时，同一机器上的 Claude Code 会话可通过 Unix Domain Socket 通信。消息封装为 `<cross-session-message>` XML。
+
+---
+
+## 11. DreamTask 与 UltraPlan
+
+### DreamTask：自动记忆整理
+
+DreamTask 运行后台代理，审查近期会话历史并将学习成果整理到 `MEMORY.md`。`priorMtime` 字段充当回滚锁 —— 如果整理在写入过程中被终止，系统可以恢复文件到整理前的状态。
+
+### UltraPlan：编排式远程执行
+
+UltraPlan 将代理范式扩展到通过 CCR（Claude Code Runner）的远程执行，实现"先规划-后执行"的工作流：远程生成计划，必须经过用户审批后才能开始实施。
 
 ---
 

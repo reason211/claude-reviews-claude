@@ -254,7 +254,266 @@ Downloaded plugins are cached as zip files to avoid re-downloading:
 
 ---
 
-## 8. Design Patterns Worth Stealing
+## 8. Skill System Architecture
+
+**Source coordinates**: `src/skills/`, `src/commands/`
+
+Skills are Claude Code's "prompt as code" system — each Skill is a Markdown file with YAML frontmatter that defines when and how a capability should be activated.
+
+### 8.1 Six Source Layers
+
+```typescript
+// 源码位置: src/skills/types.ts
+export type LoadedFrom =
+  | 'commands_DEPRECATED'  // Legacy commands/ directory (migration path)
+  | 'skills'               // .claude/skills/ directory
+  | 'plugin'               // Installed via plugin
+  | 'managed'              // Enterprise managed configuration
+  | 'bundled'              // CLI built-in skills
+  | 'mcp'                  // Provided by MCP server
+```
+
+Search paths by priority:
+
+```
+policySettings → /path/to/managed/.claude/skills/
+userSettings   → ~/.claude/skills/
+projectSettings → .claude/skills/
+plugin         → from plugin installation
+bundled        → compiled into the binary
+mcp            → discovered at runtime from MCP servers
+```
+
+### 8.2 Skill Frontmatter
+
+Every Skill is a Markdown file parsed through YAML frontmatter:
+
+```typescript
+export function parseSkillFrontmatterFields(frontmatter, markdownContent, resolvedName): {
+  displayName: string | undefined
+  description: string
+  allowedTools: string[]        // Restrict available tools
+  argumentHint: string          // Argument prompt hint
+  argumentNames: string[]       // Named argument list
+  whenToUse: string             // Model trigger condition
+  version: string
+  model: string                 // Can specify 'inherit'
+  disableModelInvocation: boolean  // Manual-only trigger
+  userInvocable: boolean         // Show in /skill list
+  hooks: HooksSettings           // Associated hooks
+  executionContext: 'fork'       // Run in isolated context
+  agent: string                  // Bind to specific agent type
+  effort: EffortValue            // Reasoning effort level
+  shell: FrontmatterShell        // Shell execution config
+}
+```
+
+### 8.3 Bundled Skills Registration
+
+Built-in skills are registered programmatically at startup:
+
+```typescript
+// 源码位置: src/skills/initBundledSkills.ts
+export function initBundledSkills(): void {
+  registerUpdateConfigSkill()   // /update-config
+  registerKeybindingsSkill()    // /keybindings
+  registerVerifySkill()         // /verify
+  registerDebugSkill()          // /debug
+  registerSimplifySkill()       // /simplify
+  registerBatchSkill()          // /batch
+  registerStuckSkill()          // /stuck
+  // Feature-gated:
+  if (feature('AGENT_TRIGGERS')) registerLoopSkill()       // /loop
+  if (feature('AGENT_TRIGGERS_REMOTE')) registerScheduleRemoteAgentsSkill()
+  if (feature('BUILDING_CLAUDE_APPS')) registerClaudeApiSkill()  // /claude-api
+}
+```
+
+### 8.4 Inline vs Fork Execution Context
+
+Skills can execute in two contexts:
+
+| Context | Behavior | Use Case |
+|---------|----------|----------|
+| **inline** | Injects prompt into current conversation | Simple commands, config changes |
+| **fork** | Runs in an isolated sub-agent with independent token budget | Complex tasks, multi-step operations |
+
+Fork execution creates a fresh query loop with its own message history, preventing Skill execution from polluting the main conversation context.
+
+### 8.5 Token Budget Management
+
+Skill listings consume ~1% of the context window:
+
+```typescript
+export const SKILL_BUDGET_CONTEXT_PERCENT = 0.01
+export const MAX_LISTING_DESC_CHARS = 250  // Per-skill description limit
+
+export function formatCommandsWithinBudget(commands, contextWindowTokens?): string {
+  // 1. Try full descriptions
+  // 2. Over budget? Bundled skills keep full descriptions, others truncated
+  // 3. Extreme case? Non-bundled show only names
+}
+```
+
+This three-tier degradation ensures that even with hundreds of installed Skills, the listing never overwhelms the context window.
+
+### 8.6 Bundled Skill File Safety
+
+When a bundled Skill carries reference files, extraction uses OS-level security:
+
+```typescript
+// O_NOFOLLOW | O_EXCL prevents symlink attacks
+const SAFE_WRITE_FLAGS = fsConstants.O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW
+
+// Path traversal validation
+function resolveSkillFilePath(baseDir: string, relPath: string): string {
+  const normalized = normalize(relPath)
+  if (isAbsolute(normalized) || normalized.split(pathSep).includes('..')) {
+    throw new Error(`bundled skill file path escapes skill dir: ${relPath}`)
+  }
+  return join(baseDir, normalized)
+}
+```
+
+---
+
+## 9. Built-in Plugin Registration
+
+**Source coordinates**: `src/plugins/`
+
+### 9.1 Plugin Definition Type
+
+```typescript
+export type BuiltinPluginDefinition = {
+  name: string
+  description: string
+  version: string
+  defaultEnabled?: boolean
+  isAvailable?: () => boolean   // Environment detection
+  skills?: BundledSkillDefinition[]
+  hooks?: HooksSettings
+  mcpServers?: McpServerConfig[]
+}
+```
+
+Each built-in plugin is a **triple** of skills + hooks + MCP servers. The `isAvailable` function enables environment-aware activation (e.g., a JetBrains-specific plugin only activates when JetBrains IDE is detected).
+
+### 9.2 Enable/Disable Logic
+
+```typescript
+export function getBuiltinPlugins(): { enabled: LoadedPlugin[], disabled: LoadedPlugin[] } {
+  for (const [name, definition] of BUILTIN_PLUGINS) {
+    // 1. Skip if environment check fails
+    if (definition.isAvailable && !definition.isAvailable()) continue
+
+    // 2. Check user setting override
+    const userSetting = settings?.enabledPlugins?.[pluginId]
+
+    // 3. Resolve: explicit setting > defaultEnabled > true
+    const isEnabled = userSetting !== undefined
+      ? userSetting === true
+      : (definition.defaultEnabled ?? true)
+  }
+}
+```
+
+### 9.3 Plugin → Skill → Command Conversion
+
+```typescript
+// Plugin-provided skills become slash commands
+export function getBuiltinPluginSkillCommands(): Command[] {
+  const { enabled } = getBuiltinPlugins()
+  for (const plugin of enabled) {
+    const definition = BUILTIN_PLUGINS.get(plugin.name)
+    if (!definition?.skills) continue
+    for (const skill of definition.skills) {
+      commands.push(skillDefinitionToCommand(skill))
+    }
+  }
+}
+```
+
+---
+
+## 10. MCP Integration Deep Dive
+
+**Source coordinates**: `src/services/mcp/client.ts`, `src/utils/plugins/mcpPluginIntegration.ts`
+
+### 10.1 Six Transport Types
+
+MCP servers connect through six transport mechanisms:
+
+| Transport | Protocol | Use Case |
+|-----------|----------|----------|
+| `stdio` | stdin/stdout | Local CLI tools |
+| `sse` | Server-Sent Events | Remote HTTP servers |
+| `http` | HTTP POST (streamable) | Stateless API servers |
+| `ws` | WebSocket | Bidirectional streaming |
+| `sdk` | In-process SDK | Same-process tools |
+| `sse-ide` | SSE via IDE proxy | IDE-bridged servers |
+
+### 10.2 Tool Discovery → Tool Object Conversion
+
+When an MCP server registers tools, they are converted into Claude Code's internal `Tool` interface:
+
+```
+MCP Server Tool Discovery
+  ↓
+listTools() response
+  ↓
+Convert each MCP tool → Tool object:
+  - name: "mcp__{serverName}__{toolName}"
+  - inputSchema: from MCP tool schema
+  - checkPermissions: checks mcp permission rules
+  - call(): proxied to MCP server
+  ↓
+Injected into assembleToolPool() with stable ordering
+```
+
+### 10.3 MCPConnectionManager
+
+A React context component that manages MCP server lifecycle:
+
+```
+Session start → discover MCP servers from settings + plugins
+  ↓
+Parallel connection → health check → tool registration
+  ↓
+Mid-session changes → incremental reconnect
+  ↓
+Session end → graceful disconnect all
+```
+
+---
+
+## 11. Background Installation Manager
+
+**Source coordinates**: `src/utils/plugins/pluginInstallationManager.ts`
+
+The `PluginInstallationManager` reconciles declared plugins with actual installations:
+
+```
+Declared plugins (from settings + marketplace)
+  ↓
+diff against actually installed plugins
+  ↓
+Missing? → Install (git clone/zip download)
+Extra? → Prompt user for cleanup
+Updated? → Auto-update if marketplace source
+  ↓
+Report progress via React state
+```
+
+Key design:
+- **Reconciliation model**: Instead of imperative "install this," the system declaratively states "these plugins should exist" and the manager handles the delta
+- **Progress feedback**: Each installation step emits progress events consumed by the ManagePlugins UI
+- **Error isolation**: One plugin failing to install doesn't block others
+
+---
+
+## Transferable Design Patterns
+
+> The following patterns from the Plugin System can be directly applied to any extensible application architecture.
 
 ### Pattern 1: Isolation by Default
 
@@ -267,6 +526,14 @@ Plugins from different sources (built-in, project, user, marketplace) are merged
 ### Pattern 3: Content-Addressed Caching
 
 The zip cache uses content hashes as keys, enabling deduplication across versions and users.
+
+### Pattern 4: Prompt as Code (Skills)
+
+Skills turn Markdown files with YAML frontmatter into executable capabilities. The frontmatter provides structured metadata (triggers, tools, models) while the Markdown body provides the prompt content. This makes Skills version-controllable, shareable, and composable.
+
+### Pattern 5: Declarative Reconciliation
+
+The `PluginInstallationManager` follows a declarative "desired state → actual state → diff → reconcile" model, borrowed from Kubernetes operators. This is more robust than imperative install/uninstall sequences because it's self-healing.
 
 ---
 

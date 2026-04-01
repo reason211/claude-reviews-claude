@@ -15,7 +15,7 @@ Claude Code isn't just a single-agent CLI. It has a hidden **Coordinator mode** 
 Claude Code operates in one of two modes, controlled by a `bun:bundle` feature flag:
 
 ```typescript
-// coordinator/coordinatorMode.ts
+// 源码位置: src/coordinator/coordinatorMode.ts:15-22
 export function isCoordinatorMode(): boolean {
   if (feature('COORDINATOR_MODE')) {
     return isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
@@ -38,6 +38,7 @@ The mode is determined at startup by a combination of:
 When resuming a session, the mode must match:
 
 ```typescript
+// 源码位置: src/coordinator/coordinatorMode.ts:28-45
 export function matchSessionMode(
   sessionMode: 'coordinator' | 'normal' | undefined,
 ): string | undefined {
@@ -90,7 +91,7 @@ graph TB
 This is enforced architecturally, not by convention:
 
 ```typescript
-// From the coordinator system prompt:
+// 源码位置: src/coordinator/coordinatorMode.ts:55-120 (system prompt)
 // "Workers can't see your conversation. Every prompt must be
 //  self-contained with everything the worker needs."
 ```
@@ -117,7 +118,7 @@ Notice what's **missing**: `BashTool`, `FileReadTool`, `FileWriteTool`, `GrepToo
 Workers are spawned via `AgentTool`. Each worker is a subprocess with its own tool set:
 
 ```typescript
-// coordinatorMode.ts
+// 源码位置: src/coordinator/coordinatorMode.ts:155-163
 const workerTools = isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)
   ? [BASH_TOOL_NAME, FILE_READ_TOOL_NAME, FILE_EDIT_TOOL_NAME]
       .sort().join(', ')
@@ -133,6 +134,7 @@ Two modes determine what tools workers get:
 Internal-only tools that workers cannot access:
 
 ```typescript
+// 源码位置: src/coordinator/coordinatorMode.ts:142-148
 const INTERNAL_WORKER_TOOLS = new Set([
   TEAM_CREATE_TOOL_NAME,
   TEAM_DELETE_TOOL_NAME,
@@ -241,6 +243,7 @@ Verification workers are spawned fresh — never continued from the implementati
 Workers are isolated, but they need a way to share data. The solution is a **scratchpad directory**:
 
 ```typescript
+// 源码位置: src/coordinator/coordinatorMode.ts:195-202
 if (scratchpadDir && isScratchpadGateEnabled()) {
   content += `\nScratchpad directory: ${scratchpadDir}\n` +
     `Workers can read and write here without permission prompts. ` +
@@ -261,7 +264,7 @@ The scratchpad is:
 Beyond standard workers, there's a **fork** mechanism gated behind another feature flag:
 
 ```typescript
-// From AgentTool/prompt.ts
+// 源码位置: src/tools/AgentTool/prompt.ts:12-15
 const forkEnabled = isForkSubagentEnabled()
 ```
 
@@ -278,7 +281,9 @@ Key rule from the prompt engineering:
 
 ---
 
-## 7. Design Patterns Worth Stealing
+## Transferable Design Patterns
+
+> The following patterns can be directly applied to other agentic systems or multi-agent orchestrators.
 
 ### Pattern 1: Compile-Time Feature Gating
 
@@ -309,7 +314,7 @@ The coordinator prompt explicitly makes synthesis the coordinator's job. This pr
 The coordinator mode hooks into QueryEngine through dependency injection:
 
 ```typescript
-// QueryEngine.ts
+// 源码位置: src/QueryEngine.ts:312-320
 const userContext = {
   ...baseUserContext,
   ...getCoordinatorUserContext(

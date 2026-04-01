@@ -262,7 +262,9 @@ When spawning teammates, the leader propagates:
 
 ---
 
-## 7. Design Insights
+## Transferable Design Patterns
+
+> The following patterns from the Swarm system can be directly applied to any multi-agent or distributed coordination architecture.
 
 ### Why File-Based Mailboxes?
 
@@ -284,6 +286,201 @@ The architecture enforces a strict leader-worker hierarchy:
 - Workers cannot create teams or approve their own plans
 - Shutdown is always leader-initiated, worker-approved
 - Permission delegation always flows worker → leader → worker
+
+---
+
+## 8. Coordinator Mode
+
+**Source coordinates**: `src/coordinator/coordinatorMode.ts`
+
+Coordinator mode transforms the leader from a task dispatcher into a **synthesis engine** — it doesn't just delegate work, it understands and integrates results.
+
+### 8.1 Activation: Double Gate
+
+```typescript
+// 源码位置: src/coordinator/coordinatorMode.ts
+export function isCoordinatorMode(): boolean {
+  if (feature('COORDINATOR_MODE')) {
+    return isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
+  }
+  return false
+}
+```
+
+Both the build-time feature flag AND the runtime environment variable must be enabled. When resuming a session, `matchSessionMode()` automatically flips the variable to match the resumed session's mode.
+
+### 8.2 Coordinator Workflow
+
+```
+Research (Workers, parallel)
+   ↓ Results returned via <task-notification>
+Synthesis (Coordinator)
+   ↓ Coordinator integrates findings
+Implementation (Workers, file-serial)
+   ↓ Write operations serialized per file set
+Verification (Workers, parallel)
+```
+
+Core principles:
+- **Coordinator owns synthesis** — no "based on your findings" delegation; the coordinator must understand and restate
+- **Parallel is the superpower** — independent workers run concurrently
+- **Read-write isolation** — research tasks parallel, write ops serialized by file sets
+- **Continue vs Spawn** — context overlap determines whether to reuse a worker or create a new one
+
+### 8.3 Worker Context Injection
+
+```typescript
+export function getCoordinatorUserContext(
+  mcpClients: ReadonlyArray<{ name: string }>,
+  scratchpadDir?: string,
+): { [k: string]: string } {
+  // Tells coordinator what tools workers have access to
+  // Injects MCP server info for tool routing decisions
+  // Provides scratchpad directory for no-prompt file sharing
+}
+```
+
+---
+
+## 9. Task Type Union (7 Variants)
+
+**Source coordinates**: `src/tasks/`
+
+Every background task in Claude Code is represented by one of seven state variants:
+
+```typescript
+export type TaskState =
+  | LocalShellTaskState         // Local shell command execution
+  | LocalAgentTaskState         // Sub-agent via AgentTool
+  | RemoteAgentTaskState        // Remote CCR agent
+  | InProcessTeammateTaskState  // Same-process team member
+  | LocalWorkflowTaskState      // Local workflow execution
+  | MonitorMcpTaskState         // MCP server monitoring
+  | DreamTaskState              // Auto-memory consolidation
+```
+
+### Progress Tracking
+
+```typescript
+export type AgentProgress = {
+  toolUseCount: number
+  tokenCount: number
+  lastActivity?: ToolActivity
+  recentActivities?: ToolActivity[]  // Last 5 tool uses
+  summary?: string
+}
+
+// input_tokens are CUMULATIVE (take latest), output_tokens are PER-TURN (sum)
+export function updateProgressFromMessage(tracker, message): void {
+  tracker.latestInputTokens = usage.input_tokens + cache_creation + cache_read
+  tracker.cumulativeOutputTokens += usage.output_tokens
+}
+```
+
+### Agent Completion Notification
+
+```xml
+<task-notification>
+  <task-id>{agentId}</task-id>
+  <status>completed|failed|killed</status>
+  <summary>{description}</summary>
+  <result>{agent final text response}</result>
+  <usage>
+    <total_tokens>N</total_tokens>
+    <tool_uses>N</tool_uses>
+    <duration_ms>N</duration_ms>
+  </usage>
+</task-notification>
+```
+
+The notification is injected as a `user` type message, so the LLM processes it naturally in the conversation flow.
+
+---
+
+## 10. Inter-Agent Communication Protocol
+
+**Source coordinates**: `src/tools/SendMessageTool/`
+
+### 10.1 Structured Message Types
+
+Beyond plain text, agents can exchange typed control messages:
+
+```typescript
+const StructuredMessage = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('shutdown_request'), reason: z.string().optional() }),
+  z.object({ type: z.literal('shutdown_response'), request_id: z.string(), approve: semanticBoolean() }),
+  z.object({ type: z.literal('plan_approval_response'), request_id: z.string(), approve: semanticBoolean(), feedback: z.string().optional() }),
+])
+
+// Input schema: `to` field supports multiple routing targets
+const inputSchema = z.object({
+  to: z.string(),      // "name" | "*" (broadcast) | "uds:path" | "bridge:session_id"
+  summary: z.string().optional(),
+  message: z.union([z.string(), StructuredMessage]),
+})
+```
+
+### 10.2 Message Routing
+
+```
+SendMessage(to="researcher", message="...")
+  ↓
+InProcessTeammate? → findTeammateTaskByAgentId → direct pendingMessages
+  ↓ No
+LocalAgent? → queuePendingMessage → consumed at tool-round boundary
+  ↓ No
+Pane (tmux/iterm2)? → writeToMailbox → filesystem mailbox
+  ↓ No
+UDS/Bridge? → socket/bridge transport
+  ↓ No
+"*" (broadcast)? → iterate all team members, send individually
+```
+
+### 10.3 Cross-Session Communication (UDS)
+
+When `feature('UDS_INBOX')` is enabled, Claude Code sessions on the same machine can communicate via Unix Domain Sockets:
+
+```typescript
+// "uds:/tmp/cc-socks/1234.sock" — local Claude session
+// "bridge:session_01AbCd..." — Remote Control session
+// Messages wrapped as <cross-session-message from="..."> XML
+```
+
+---
+
+## 11. DreamTask & UltraPlan
+
+### DreamTask: Automatic Memory Consolidation
+
+**Source coordinates**: `src/tasks/` — `DreamTaskState`
+
+```typescript
+export type DreamTaskState = TaskStateBase & {
+  type: 'dream'
+  phase: 'starting' | 'updating'
+  sessionsReviewing: number
+  filesTouched: string[]    // Incomplete — only Edit/Write tool_use, misses bash writes
+  turns: DreamTurn[]        // Last 30 turns
+  abortController?: AbortController
+  priorMtime: number        // Rollback lock on kill
+}
+```
+
+DreamTask runs a background agent that reviews recent session history and consolidates learnings into `MEMORY.md`. The `priorMtime` field acts as a rollback lock — if the dream is killed mid-write, the system can restore the file to its pre-dream state.
+
+### UltraPlan: Orchestrated Remote Execution
+
+```typescript
+export type RemoteAgentTaskState = TaskStateBase & {
+  type: 'remote_agent'
+  remoteTaskType: RemoteTaskType  // 'ultraplan' | 'ultrareview' | 'autofix-pr' | ...
+  isUltraplan?: boolean
+  ultraplanPhase?: 'needs_input' | 'plan_ready'
+  // ...
+}
+```
+
+UltraPlan extends the agent paradigm to remote execution via CCR (Claude Code Runner), enabling plan-then-execute workflows where the plan is generated remotely and must receive user approval before implementation begins.
 
 ---
 

@@ -58,6 +58,7 @@ graph TB
 入口点是 `BashTool.tsx` —— 一个 1144 行的工具定义，使用标准的 `buildTool()` 模式构建。输入模式看似简单：
 
 ```typescript
+// 源码位置: src/tools/BashTool/BashTool.tsx:45-54
 z.strictObject({
   command: z.string(),
   timeout: semanticNumber(z.number().optional()),
@@ -90,6 +91,7 @@ z.strictObject({
 执行的核心是一个 **AsyncGenerator** —— 一种优雅地将进度报告与命令完成统一起来的设计：
 
 ```typescript
+// 源码位置: src/tools/BashTool/BashTool.tsx:200-280
 async function* runShellCommand({...}): AsyncGenerator<进度, 结果, void> {
   // 1. 判断是否允许自动后台化
   // 2. 通过 Shell.exec() 执行
@@ -271,23 +273,28 @@ sequenceDiagram
 
 ---
 
-## 8. 设计洞察
+## 可迁移设计模式
 
-### 为什么合并 stdout 和 stderr？
+> 以下模式可直接应用于其他 CLI 工具或进程编排系统。
 
-通过将两者导入同一个文件描述符，Claude Code 避免了经典的竞态条件 —— 并发写入的 stdout 和 stderr 到达顺序混乱。
+### 模式 1：stdout/stderr 合并到单一 fd
+**场景：** 并发写入的 stdout 和 stderr 到达顺序混乱。
+**实践：** 将两者导入同一个文件描述符，配合 `O_APPEND` 保证每次写入的原子性。
+**Claude Code 中的应用：** `spawn(shell, args, { stdio: ['pipe', outputHandle.fd, outputHandle.fd] })`。
 
-### Claude Code 提示协议
+### 模式 2：零 Token 侧信道
+**场景：** CLI 工具需要传递元数据（提示、插件建议）但不能膨胀 LLM 上下文窗口。
+**实践：** 向 stderr 发出结构化标签，扫描后剥离再传给模型。
+**Claude Code 中的应用：** `<claude-code-hint />` 标签被 `extractClaudeCodeHints()` 提取后剥离，模型永远看不到。
 
-当命令在 `CLAUDECODE=1` 环境下运行时，CLI/SDK 可以向 stderr 发出 `<claude-code-hint />` 标签。BashTool 扫描这些标签，记录后用于插件推荐，然后**剥离**它们使模型永远看不到 —— 一条**零 Token 侧信道**。
-
-### AsyncGenerator 实现进度：优雅的简约
-
-`runShellCommand()` 的生成器模式值得学习。不用回调、事件发射器或 rxjs observable，一个简单的 `yield` 在 `while(true)` 循环中产生进度更新。`Promise.race([结果Promise, 进度信号])` 模式在单个 await 中优雅地处理完成和进度。
+### 模式 3：AsyncGenerator 进度报告
+**场景：** 长时间运行的子进程需要增量报告进度，同时最终交付结果。
+**实践：** 使用 AsyncGenerator——`yield` 产生进度更新，`return` 交付最终结果。消费者用 `Promise.race([结果Promise, 进度信号])` 在单个 await 中同时处理两者。
+**Claude Code 中的应用：** `runShellCommand()` 每秒 yield 进度，命令完成时 return `ExecResult`。
 
 ---
 
-## 组件总结
+## 9. 组件总结
 
 | 组件 | 行数 | 角色 |
 |------|------|------|

@@ -140,6 +140,7 @@ When at capacity, the bridge can operate in two heartbeat patterns:
 ### Error Recovery
 
 ```typescript
+// 源码位置: src/bridge/bridgeMain.ts:320-340
 const DEFAULT_BACKOFF: BackoffConfig = {
   connInitialMs: 2_000,
   connCapMs: 120_000,      // 2 minutes max backoff
@@ -290,36 +291,24 @@ The bridge also handles server-initiated control requests:
 
 ---
 
-## Design Insights
+## Transferable Design Patterns
 
-### Why Two Transport Generations?
+> The following patterns can be directly applied to other remote-control or distributed agent systems.
 
-v1 (WebSocket) was the original design. v2 (SSE+CCRClient) was introduced to:
-1. **Eliminate long-lived WS connections** — SSE reconnects transparently
-2. **Add delivery tracking** — `received/processing/processed` states for reliability
-3. **Enable epoch-based conflict resolution** — multiple workers can't collide
-4. **Reduce server load** — batched POST writes vs per-message WS frames
+### Pattern 1: Epoch-Based Conflict Resolution
+**Scenario:** Multiple workers may compete for the same session after reconnection.
+**Practice:** Assign a monotonically increasing epoch on registration; reject stale-epoch requests with 409.
+**Claude Code application:** v2 transport uses `worker_epoch` — a 409 triggers transport teardown and re-poll.
 
-### The CapacityWake Pattern
+### Pattern 2: CapacityWake (AbortController-Based Sleep Interrupt)
+**Scenario:** A bridge sleeps during at-capacity wait but needs to react instantly when a slot opens.
+**Practice:** Use an `AbortController` signal to interrupt the sleep timer.
+**Claude Code application:** `capacityWake.wake()` interrupts the poll sleep so the bridge accepts new work immediately.
 
-```typescript
-// Problem: bridge is sleeping during at-capacity wait
-// Solution: AbortController-based wake signal
-capacityWake.wake()  // Session ended → interrupt sleep immediately
-```
-
-Without this, the bridge would wait up to `atCapMs` (potentially minutes) before noticing a slot opened.
-
-### Why Bootstrap-Isolation Matters Here
-
-The bridge code carefully avoids importing from the main REPL tree. Dependencies like `auth.ts`, `config.ts`, and `commands.ts` are injected as callbacks:
-
-```typescript
-// Instead of: import { createBridgeSession } from './createSession.ts'
-// Injected as: createSession: (opts) => Promise<string | null>
-// Reason: createSession.ts lazy-loads auth/model/oauth which pull
-//         the entire REPL tree into the Agent SDK bundle
-```
+### Pattern 3: Bootstrap-Isolation via Callback Injection
+**Scenario:** A subsystem (bridge) must avoid importing the main module tree to keep its bundle small.
+**Practice:** Inject dependencies as callbacks instead of direct imports.
+**Claude Code application:** `createSession` is injected as `(opts) => Promise<string | null>` to avoid pulling the entire REPL tree into the Agent SDK bundle.
 
 ---
 
@@ -343,6 +332,4 @@ The bridge code carefully avoids importing from the main REPL tree. Dependencies
 
 ---
 
-*Series finale. Thanks for reading the entire deep dive.*
-
-[← Episode 12 — Startup & Bootstrap](12-startup-bootstrap.md)
+[← Episode 12 — Startup & Bootstrap](12-startup-bootstrap.md) · [Episode 14 — UI & State Management →](14-ui-state-management.md)

@@ -57,6 +57,7 @@ graph LR
 ### Zero-Import Fast-Path
 
 ```typescript
+// 源码位置: src/cli.tsx:25-30
 // --version: Zero module loading needed
 if (args.length === 1 && (args[0] === '--version' || args[0] === '-v')) {
   console.log(`${MACRO.VERSION} (Claude Code)`)  // Build-time constant
@@ -147,7 +148,7 @@ Settings must load eagerly because they influence module-level constants (e.g., 
 ### API Preconnection
 
 ```typescript
-// apiPreconnect.ts — Overlap TCP+TLS handshake with startup work
+// 源码位置: src/utils/apiPreconnect.ts:10-25
 export function preconnectAnthropicApi(): void {
   // Skip if using proxy/mTLS/unix socket (SDK uses different transport)
   // Skip if using Bedrock/Vertex/Foundry (different endpoints)
@@ -301,6 +302,7 @@ During active scrolling, background intervals (analytics, file watchers) volunta
 ### Phase Definitions
 
 ```typescript
+// 源码位置: src/utils/startupProfiler.ts:30-40
 const PHASE_DEFINITIONS = {
   import_time: ['cli_entry', 'main_tsx_imports_loaded'],
   init_time: ['init_function_start', 'init_function_end'],
@@ -338,27 +340,24 @@ main_after_run                     →  ~1000ms (REPL ready)
 
 ---
 
-## Design Insights
+## Transferable Design Patterns
 
-### Why Dynamic Imports Everywhere?
+> The following patterns can be directly applied to other CLI tools or process bootstrapping systems.
 
-CLI tools have a startup budget of ~1 second. Claude Code's full module tree is 200+ files. Dynamic imports let each fast-path load only what it needs:
+### Pattern 1: Fast-Path Cascade with Dynamic Imports
+**Scenario:** A CLI tool has a ~1s startup budget but a 200+ file module tree.
+**Practice:** Use dynamic `await import()` to create a cascade of fast-paths, each loading only what it needs.
+**Claude Code application:** `--version` loads 0 imports (~5ms), `--daemon-worker` loads ~10 (~50ms), normal loads 200+ (~500-1000ms).
 
-- `--version`: 0 imports, ~5ms
-- `--daemon-worker`: ~10 imports, ~50ms
-- Normal interactive: 200+ imports, ~500-1000ms
+### Pattern 2: DAG Leaf for Global State
+**Scenario:** A global state singleton risks creating circular dependencies if it imports from the module tree.
+**Practice:** Make the state module the leaf of the dependency graph — it imports almost nothing, enforced by a lint rule.
+**Claude Code application:** `bootstrap/state.ts` imports only `crypto`/`lodash`/`process`; an ESLint `bootstrap-isolation` rule prevents deeper imports.
 
-### The DAG Leaf Pattern
-
-`bootstrap/state.ts` is the **leaf** of the module dependency graph — it imports almost nothing (`crypto`, `lodash`, `process`). This is enforced by an ESLint rule (`bootstrap-isolation`) that prevents it from importing modules that would create circular dependencies.
-
-### Preconnection vs Prefetch
-
-Two different warm-up strategies:
-- **Preconnection** (`apiPreconnect.ts`): TCP+TLS handshake — saves ~100-200ms on first API call
-- **Prefetch** (`setup.ts`): Commands, plugins, hooks — saves ~200ms on first user interaction
-
-Both use fire-and-forget patterns so they don't block the startup path.
+### Pattern 3: Preconnection vs Prefetch
+**Scenario:** Startup needs to warm multiple resources (network, data) without blocking.
+**Practice:** Separate TCP+TLS preconnection (fire-and-forget HEAD) from data prefetch (fire-and-forget async calls), both non-blocking.
+**Claude Code application:** `preconnectAnthropicApi()` saves ~100-200ms on first API call; `void getCommands()` prefetches data in parallel.
 
 ### The Ablation Baseline
 

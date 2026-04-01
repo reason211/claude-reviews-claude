@@ -340,3 +340,7 @@ if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
 | **消息** | `normalizeMessagesForAPI()` —— 不可变原件、yield 前克隆、thinking block 规则 |
 | **关键原则** | "愚钝的脚手架，聪明的模型" —— 循环必须保持简单，复杂逻辑留给 LLM |
 
+---
+
+**上一篇**: [← 00 — Claude Code 完整架构解析](00-overview.md)
+**下一篇**: [→ 02 — 工具系统](02-tool-system.md)

@@ -1,4 +1,4 @@
-﻿# 00 — The Complete Architecture of Claude Code
+# 00 — The Complete Architecture of Claude Code
 
 > 🌐 **Language**: English | [中文版 →](zh-CN/00-overview.md)
 
@@ -1084,3 +1084,7 @@ The common thread: **respect every resource** — time, tokens, security, user t
 ---
 
 *This document is part of the [Claude Code Deep Dive](../README_EN.md) series — 17 episodes of architectural analysis covering 8,600+ lines of technical content, available in English and Chinese.*
+
+---
+
+**Next**: [→ 01 — Query Engine](01-query-engine.md)

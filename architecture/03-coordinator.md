@@ -321,3 +321,8 @@ The coordinator also gets a completely different system prompt via `getCoordinat
 | **Fork optimization** | Context-inheriting forks share prompt cache |
 | **Workflow** | Research → Synthesis → Implementation → Verification |
 | **Key principle** | "Never delegate understanding" — coordinator synthesizes, workers execute |
+
+---
+
+**Previous**: [← 02 — Tool System](02-tool-system.md)
+**Next**: [→ 04 — Plugin System](04-plugin-system.md)

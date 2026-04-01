@@ -509,3 +509,8 @@ The `PluginInstallationManager` follows a declarative "desired state → actual 
 | **Marketplace** | GCS bucket catalog, auto-update, blocklist, install counts |
 | **Security** | Workspace trust, validation, blocklist, orphan detection |
 | **Caching** | Content-addressed zip cache for offline use |
+
+---
+
+**Previous**: [← 03 — Multi-Agent Coordinator](03-coordinator.md)
+**Next**: [→ 05 — Hook System](05-hook-system.md)

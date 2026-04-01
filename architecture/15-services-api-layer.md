@@ -686,6 +686,6 @@ async function* withRetry<T>(
 
 ---
 
-*The services layer is where Claude Code's ambitions meet the real world's failure modes. Next: [Episode 16 — Infrastructure & Config](16-infrastructure-config.md)*
+*The services layer is where Claude Code's ambitions meet the real world's failure modes.*
 
-[← Episode 14 — UI & State Management](14-ui-state-management.md)
+[← Episode 14 — UI & State Management](14-ui-state-management.md) · [Episode 16 — Infrastructure & Config →](16-infrastructure-config.md)

@@ -903,4 +903,4 @@ The three-tier system (Compile-Time DCE → Environment Check → GrowthBook) en
 
 ---
 
-**Previous**: [← 15 — Services & API Layer](15-services-api-layer.md) · **Next**: [00 — Overview (coming soon)](00-overview.md)
+**Previous**: [← 15 — Services & API Layer](15-services-api-layer.md) · **Next**: [17 — Telemetry, Privacy & Operations →](17-telemetry-privacy-operations.md)

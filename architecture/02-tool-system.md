@@ -617,3 +617,7 @@ All three tools share a `readFileState` Map keyed by absolute path. FileReadTool
 | **Result Size** | Per-tool `maxResultSizeChars`; overflow → disk persistence + preview |
 | **File Tools** | Read (6 output types + dedup) / Edit (8-check validation + stale write guard) / Write (simple overwrite) |
 
+---
+
+**Previous**: [← 01 — Query Engine](01-query-engine.md)
+**Next**: [→ 03 — Multi-Agent Coordinator](03-coordinator.md)

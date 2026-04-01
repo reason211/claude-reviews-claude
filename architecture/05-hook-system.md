@@ -1,4 +1,4 @@
-﻿> 🌐 **Language**: English | [中文版 →](zh-CN/05-hook-system.md)
+> 🌐 **Language**: English | [中文版 →](zh-CN/05-hook-system.md)
 
 # Hook System: 20 Event Types, Full Lifecycle Interception
 
@@ -231,3 +231,8 @@ The `preparePermissionMatcher()` pattern pre-compiles the matching logic once, t
 | **Security** | Workspace trust required, managed hooks only option |
 | **Async** | Background execution with re-wake capability |
 | **Aggregation** | Most restrictive wins (deny > allow) |
+
+---
+
+**Previous**: [← 04 — Plugin System](04-plugin-system.md)
+**Next**: [→ 06 — Bash Execution Engine](06-bash-engine.md)

@@ -1,4 +1,4 @@
-﻿# 07 — Permission Pipeline: Defense-in-Depth from Rules to Kernel
+# 07 — Permission Pipeline: Defense-in-Depth from Rules to Kernel
 
 > **Scope**: `utils/permissions/` (24 files, ~320KB), `utils/settings/` (17 files, ~135KB), `utils/sandbox/` (2 files, ~37KB)
 >
@@ -505,3 +505,4 @@ The permission pipeline is Claude Code's most architecturally sophisticated subs
 ---
 
 **Previous**: [← 06 — Bash Execution Engine](06-bash-engine.md)
+**Next**: [→ 08 — Agent Swarms](08-agent-swarms.md)

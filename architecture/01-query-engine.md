@@ -710,3 +710,7 @@ This is a **harness-science L0 ablation** — it strips every intelligent optimi
 | **Messages** | `normalizeMessagesForAPI()` — immutable originals, clone-before-yield, thinking block rules |
 | **Key principle** | "Dumb scaffold, smart model" — the loop is simple, intelligence is in the LLM |
 
+---
+
+**Previous**: [← 00 — Overview](00-overview.md)
+**Next**: [→ 02 — Tool System](02-tool-system.md)
